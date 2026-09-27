@@ -7,6 +7,7 @@ import * as auth from "./auth.js";
 import { loadSettings, saveSettings } from "./config.js";
 import * as disk from "./yadisk.js";
 import { runJob, STEPS } from "./pipeline.js";
+import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts"];
@@ -15,7 +16,7 @@ let win = null;
 const send = (channel, payload) => win?.webContents.send(channel, payload);
 
 // ---------- очередь: задания выполняются по одному ----------
-// job: { id, file, name, state, controller, lively, diskPath, duration, voiceUsed }
+// job: { id, file, name, state, controller, lively, lang, diskPath, duration, voiceUsed, langUsed }
 // diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
 const jobs = new Map();
 const queue = [];
@@ -23,7 +24,8 @@ let running = false;
 let currentRun = null; // промис текущего задания — при выходе ждём, пока оно закроет ссылку
 
 function publicJob(j) {
-  return { id: j.id, file: j.file, name: j.name, state: j.state, lively: j.lively, voiceUsed: j.voiceUsed };
+  return { id: j.id, file: j.file, name: j.name, state: j.state, lively: j.lively, lang: j.lang,
+    voiceUsed: j.voiceUsed, langUsed: j.langUsed };
 }
 
 function enqueue(job) {
@@ -46,10 +48,11 @@ async function pump() {
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
     currentRun = runJob(job, { options: loadSettings(), token },
       (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
-    const { outputs, lively } = await currentRun;
+    const { outputs, lively, lang } = await currentRun;
     job.state = "done";
     job.voiceUsed = lively;
-    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively });
+    job.langUsed = lang;
+    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively, langUsed: lang });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "" });
@@ -61,13 +64,14 @@ async function pump() {
 }
 
 function addJobs(files) {
-  const lively = loadSettings().livelyVoice;
+  const { livelyVoice: lively, sourceLang } = loadSettings();
+  const lang = lively ? LIVELY_LANG : sourceLang;
   const added = [];
   for (const file of files) {
     const ext = path.extname(file).slice(1).toLowerCase();
     if (!VIDEO_EXT.includes(ext)) continue;
     const job = { id: randomUUID(), file, name: path.basename(file), state: "queued", controller: new AbortController(),
-      lively, diskPath: null, duration: null, voiceUsed: null };
+      lively, lang, diskPath: null, duration: null, voiceUsed: null, langUsed: null };
     jobs.set(job.id, job);
     queue.push(job);
     added.push(publicJob(job));
@@ -150,7 +154,7 @@ ipcMain.handle("auth:openPage", (_e, url) => {
   if (/^https:\/\/([a-z0-9-]+\.)*(ya\.ru|yandex\.ru)\//.test(url)) shell.openExternal(url);
 });
 
-ipcMain.handle("app:info", () => ({ steps: STEPS, version: app.getVersion() }));
+ipcMain.handle("app:info", () => ({ steps: STEPS, version: app.getVersion(), languages: SOURCE_LANGS, livelyLang: LIVELY_LANG }));
 ipcMain.handle("settings:get", () => loadSettings());
 ipcMain.handle("settings:set", (_e, patch) => saveSettings(patch));
 
@@ -183,6 +187,10 @@ ipcMain.handle("jobs:cancel", (_e, id) => {
 ipcMain.handle("jobs:setVoice", (_e, id, lively) => {
   const job = jobs.get(id);
   if (job) job.lively = Boolean(lively);
+});
+ipcMain.handle("jobs:setLang", (_e, id, lang) => {
+  const job = jobs.get(id);
+  if (job && SOURCE_LANGS.some((l) => l.code === lang)) job.lang = lang;
 });
 // ещё один запрос к Яндексу (новая ссылка → свежий перевод) текущим голосом видео
 ipcMain.handle("jobs:retranslate", (_e, id) => {

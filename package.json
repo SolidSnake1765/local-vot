@@ -11,6 +11,7 @@
   "author": "SolidSnake1765",
   "license": "MIT",
   "dependencies": {
+    "@vot.js/core": "^3.1.4",
     "@vot.js/node": "^3.1.4",
     "ffmpeg-static": "^5.2.0"
   },

@@ -20,7 +20,8 @@ export const DEFAULT_SETTINGS = {
   embedSubs: true,          // вшить русские субтитры в видео
   saveAudio: false,         // дорожка перевода отдельно (.mp3)
   saveSubs: false,          // субтитры отдельно (.srt)
-  livelyVoice: true,        // «живые голоса» Яндекса — похожи на оригинальных говорящих
+  livelyVoice: true,        // «живые голоса» Яндекса — похожи на оригинальных говорящих (только с английского)
+  sourceLang: "auto",       // язык видео для новых видео, если живые голоса выключены
   voiceGain: 1.0,           // громкость перевода
   duck: "medium",           // насколько приглушать оригинал под переводом: light | medium | strong
   deletePermanently: false, // удалять копию с Диска мимо Корзины

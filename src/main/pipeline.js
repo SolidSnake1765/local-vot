@@ -6,6 +6,7 @@ import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
 import { makeLight, mux, probe } from "./media.js";
+import { detectedName, langName, LIVELY_LANG } from "./languages.js";
 
 export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
@@ -57,7 +58,7 @@ export async function runJob(job, { options, token }, emit, signal) {
       await uploadCopy(job, work, token, step, signal);
     }
 
-    const { result, lively } = await translateOnce(job, work, token, step, emit, signal);
+    const { result, lively, lang } = await translateOnce(job, work, token, step, emit, signal);
 
     step("save", { state: "active", detail: "" });
     mkdirSync(outDir, { recursive: true });
@@ -80,7 +81,7 @@ export async function runJob(job, { options, token }, emit, signal) {
       outputs.push(out);
     }
     step("save", { state: "done", detail: "" });
-    return { outputs, lively };
+    return { outputs, lively, lang };
   } catch (e) {
     if (current) emit({ step: current, state: "error", detail: e.message });
     throw e;
@@ -131,6 +132,8 @@ async function translateOnce(job, work, token, step, emit, signal) {
   const onStatus = (msg) => step("translate", { detail: msg });
   const base = path.join(work, "yandex");
   let lively = Boolean(job.lively);
+  // живые голоса — только с английского (и не с автоопределением), интерфейс держит это же правило
+  const lang = lively ? LIVELY_LANG : (job.lang || "auto");
   let result;
   try {
     step("translate", { state: "active", detail: "Открываем доступ к файлу" });
@@ -146,17 +149,22 @@ async function translateOnce(job, work, token, step, emit, signal) {
       throw e;
     }
     try {
-      result = await translate(url, job.duration, base, onStatus, signal, { lively, token });
+      result = await translate(url, job.duration, base, onStatus, signal, { lively, token, lang });
     } catch (e) {
       if (!lively || signal.aborted) throw e;
       // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
       onStatus("Живые голоса не получились, переводим обычными");
-      lively = false;
-      result = await translate(url, job.duration, base, onStatus, signal);
+      result = await translate(url, job.duration, base, onStatus, signal, { lang });
     }
+    checkLanguage(lang, lively, result.detectedLang);
+    lively = result.lively;
+    const langText = lang === "auto"
+      ? `${result.detectedLang ? detectedName(result.detectedLang) : "язык не определён"} (автоопределение)`
+      : langName(lang).toLowerCase();
     step("translate", {
       state: "done",
-      detail: [lively ? "Живые голоса" : "Обычные голоса", result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
+      detail: [lively ? "Живые голоса" : "Обычные голоса", langText,
+        result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
     });
   } finally {
     // что бы ни случилось — не оставляем файл висеть по открытой ссылке
@@ -167,5 +175,25 @@ async function translateOnce(job, work, token, step, emit, signal) {
         .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
     }
   }
-  return { result, lively };
+  return { result, lively, lang };
+}
+
+/**
+ * Яндекс не отказывает, если язык указан неверно, — «переводит» чужую речь, получается мусор.
+ * Но в ответе остаётся след: при верном языке поле language пустое, при неверном — там язык,
+ * который Яндекс нашёл сам (проверено на русской речи с пометкой «английский»: вернул it,
+ * то есть само определение неточное, но несовпадение видно надёжно).
+ */
+function checkLanguage(lang, lively, detected) {
+  if (lang === "auto") {
+    if (detected === "ru") throw new Error("В видео русская речь — переводить на русский нечего.");
+    return;
+  }
+  if (!detected || detected === lang) return;
+  if (lively) {
+    throw new Error("Английская речь не найдена. Живые голоса работают только с английским — "
+      + "выключите их, выберите язык видео или «Автоопределение» и нажмите «Перевести заново».");
+  }
+  throw new Error(`Речь в видео не похожа на ${langName(lang).toLowerCase()}. `
+    + "Выберите другой язык или «Автоопределение» и нажмите «Перевести заново».");
 }

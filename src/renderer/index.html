@@ -54,9 +54,14 @@
         </div>
       </div>
 
-      <h2>Голос</h2>
-      <label class="check"><input type="checkbox" data-setting="livelyVoice"> Живые голоса для новых видео</label>
-      <p class="note tight">Голоса, похожие на оригинальных говорящих, как в плагине Яндекса. У каждого видео в очереди — свой переключатель. Если живые голоса недоступны, переведём обычными.</p>
+      <h2>Для новых видео</h2>
+      <label class="check"><input type="checkbox" data-setting="livelyVoice"> Живые голоса</label>
+      <p class="note tight">Голоса, похожие на оригинальных говорящих. Работают только с английского.</p>
+      <label class="select">
+        <span>Язык видео</span>
+        <select data-setting="sourceLang" id="settingsLang"></select>
+      </label>
+      <p class="note">У каждого видео в очереди — свои голос и язык, их можно поменять в карточке.</p>
 
       <h2>Звук</h2>
       <label class="range">
@@ -107,6 +112,7 @@
           <span class="badge"></span>
         </div>
         <div class="job-controls">
+          <select class="job-lang" title="Язык речи в видео"></select>
           <label class="switch" title="Голоса, похожие на оригинальных говорящих">
             <input type="checkbox" class="job-lively">
             <span class="switch-track"><span class="switch-thumb"></span></span>
@@ -115,13 +121,19 @@
           <button class="btn btn-small btn-ghost job-cancel" type="button">Отменить</button>
         </div>
       </div>
+      <p class="job-note" hidden></p>
       <ol class="steps"></ol>
       <p class="error job-error" hidden></p>
       <div class="outputs" hidden></div>
       <div class="job-actions" hidden>
-        <button class="btn btn-small job-retranslate" type="button"></button>
-        <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>
-        <span class="muted small job-hint"></span>
+        <div class="action-row">
+          <button class="btn btn-small job-retranslate" type="button"></button>
+          <span class="muted small job-hint"></span>
+        </div>
+        <div class="action-row">
+          <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>
+          <span class="muted small">Также удаляет копию видео с Яндекс Диска. Файлы на компьютере остаются.</span>
+        </div>
       </div>
     </article>
   </template>

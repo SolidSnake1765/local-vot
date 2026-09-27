@@ -1,8 +1,17 @@
 // Перевод видео по публичной ссылке через vot.js (неофициальный API переводчика Яндекса):
 // ожидание готовности, скачивание русской дорожки (mp3) и субтитров (srt).
 import { writeFileSync } from "node:fs";
+import { YandexVOTProtobuf } from "@vot.js/core/protobuf";
 import VOTClient from "@vot.js/node";
 import { getVideoData } from "@vot.js/node/utils/videoData";
+
+// vot.js не отдаёт наружу поля ответа Яндекса language и isLivelyVoice, а они нужны:
+// language — какой язык Яндекс нашёл в видео (при автоопределении — всегда; при явно указанном
+// языке заполняется, только если речь на него не похожа), isLivelyVoice — вышли ли живые голоса.
+// Перехватываем расшифровку ответа. Задания идут по одному, так что хватает «последнего ответа».
+let lastResponse = {};
+const decodeResponse = YandexVOTProtobuf.decodeTranslationResponse;
+YandexVOTProtobuf.decodeTranslationResponse = (buf) => (lastResponse = decodeResponse(buf));
 
 // status: 1 — готово, 2/3 — ждём, 5 — готова только часть (~10 мин), ждём полный перевод, 0 — отказ
 const FINISHED = 1;
@@ -22,11 +31,15 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
  * @param onStatus текст для пользователя о ходе перевода
  * @param lively   «живые голоса» (голоса, похожие на оригинальные; только EN→RU). Нужен токен
  *                 Яндекса — подходит токен входа нашего приложения (проверено: isLivelyVoice=true)
+ * @param lang     язык видео: код или "auto"
+ * @returns { audio, subs, subsCount, detectedLang, lively } — detectedLang: что нашёл Яндекс (или null),
+ *          lively: вышли ли на самом деле живые голоса
  */
-export async function translate(url, duration, base, onStatus, signal, { lively = false, token } = {}) {
-  const client = new VOTClient({ requestLang: "en", responseLang: "ru", apiToken: lively ? token : undefined });
+export async function translate(url, duration, base, onStatus, signal, { lively = false, token, lang = "en" } = {}) {
+  const client = new VOTClient({ requestLang: lang, responseLang: "ru", apiToken: lively ? token : undefined });
   const extraOpts = { useLivelyVoice: Boolean(lively && token) };
   const videoData = { ...(await getVideoData(url)), duration };
+  lastResponse = {};
 
   let res;
   let errors = 0;
@@ -38,7 +51,7 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
       // с false повторные запросы падают с «error_id ... see logs».
       // bypassCache бесполезен: Яндекс всё равно отдаёт кэш по ссылке (проверено) — для свежего
       // перевода нужна новая ссылка, её даёт переопубликация файла на Диске
-      res = await client.translateVideo({ videoData, extraOpts });
+      res = await client.translateVideo({ videoData, requestLang: lang, extraOpts });
       errors = 0;
     } catch (e) {
       if (e.data?.status === 0 || /couldn't translate/i.test(e.message)) {
@@ -57,14 +70,19 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
     await sleep(POLL, signal);
   }
 
+  const detectedLang = lastResponse.language || null;
+  const result = {
+    audio: `${base}.ru.mp3`, subs: null, subsCount: 0,
+    detectedLang, lively: Boolean(lastResponse.isLivelyVoice),
+  };
+
   onStatus("Скачиваем перевод");
   const audio = Buffer.from(await (await fetch(res.url, { signal })).arrayBuffer());
-  writeFileSync(`${base}.ru.mp3`, audio);
-  const result = { audio: `${base}.ru.mp3`, subs: null, subsCount: 0 };
+  writeFileSync(result.audio, audio);
 
   // Субтитры: Яндекс отдаёт оригинальные и переведённые (json, таймкоды в мс)
   try {
-    const subs = await client.getSubtitles({ videoData, requestLang: "en" });
+    const subs = await client.getSubtitles({ videoData, requestLang: lang === "auto" ? (detectedLang ?? "en") : lang });
     const ru = subs.subtitles.find((s) => s.translatedLanguage === "ru") ?? subs.subtitles[0];
     if (ru) {
       const raw = await (await fetch(ru.translatedUrl ?? ru.url, { signal })).json();

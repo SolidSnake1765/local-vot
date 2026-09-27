@@ -103,7 +103,11 @@ select {
 .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #9f7bff); transition: width .3s; }
 
 .job-controls { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-.job-actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.job-controls select { width: auto; margin: 0; padding: 5px 8px; font-size: 13px; }
+.job-controls select:disabled { opacity: .6; }
+.job-note { margin: 8px 0 0; font-size: 12px; color: var(--warn); }
+.job-actions { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.action-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* тумблер */
 .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }

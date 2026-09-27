@@ -4,7 +4,19 @@ const $ = (id) => document.getElementById(id);
 
 const STATE_LABEL = { queued: "В очереди", running: "Идёт перевод", done: "Готово", error: "Ошибка", cancelled: "Отменено" };
 let STEPS = [];
+let LANGS = [];
+let LIVELY_LANG = "en";
 let loggedIn = false;
+const langName = (code) => LANGS.find((l) => l.code === code)?.name ?? code;
+
+function fillLangSelect(select) {
+  for (const l of LANGS) {
+    const opt = document.createElement("option");
+    opt.value = l.code;
+    opt.textContent = l.name;
+    select.append(opt);
+  }
+}
 const cards = new Map(); // id задания → элементы карточки
 // задание стартует сразу после добавления, и первые события могут прийти раньше, чем появится карточка
 const early = new Map(); // id → события, ждущие своей карточки
@@ -105,13 +117,41 @@ function createCard(job) {
     ol.append(li);
     steps[s.id] = li;
   }
-  const card = { id: job.id, node, steps, state: job.state, lively: job.lively, voiceUsed: job.voiceUsed ?? null };
+  const card = { id: job.id, node, steps, state: job.state, lively: job.lively, lang: job.lang,
+    voiceUsed: job.voiceUsed ?? null, langUsed: job.langUsed ?? null };
 
+  // живые голоса — только с английского: тумблер и язык подстраивают друг друга
   const toggle = node.querySelector(".job-lively");
+  const langSelect = node.querySelector(".job-lang");
+  const note = node.querySelector(".job-note");
+  const showNote = (text) => { note.textContent = text; note.hidden = !text; };
+  fillLangSelect(langSelect);
   toggle.checked = Boolean(job.lively);
+  langSelect.value = job.lang;
   toggle.onchange = () => {
     card.lively = toggle.checked;
     api.setJobVoice(job.id, card.lively);
+    if (card.lively && card.lang !== LIVELY_LANG) {
+      card.lang = LIVELY_LANG;
+      langSelect.value = LIVELY_LANG;
+      api.setJobLang(job.id, LIVELY_LANG);
+      showNote("Язык переключён на английский — живые голоса работают только с ним.");
+    } else {
+      showNote("");
+    }
+    refreshActions(card);
+  };
+  langSelect.onchange = () => {
+    card.lang = langSelect.value;
+    api.setJobLang(job.id, card.lang);
+    if (card.lively && card.lang !== LIVELY_LANG) {
+      card.lively = false;
+      toggle.checked = false;
+      api.setJobVoice(job.id, false);
+      showNote("Живые голоса выключены — они работают только с английским.");
+    } else {
+      showNote("");
+    }
     refreshActions(card);
   };
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
@@ -140,14 +180,16 @@ function setState(card, state) {
   badge.className = `badge ${state}`;
   const active = ["queued", "running"].includes(state);
   card.node.querySelector(".job-cancel").hidden = !active;
-  // пока идёт перевод, голос уже выбран — переключатель заморожен
+  // пока идёт перевод, голос и язык уже выбраны — переключатели заморожены
   card.node.querySelector(".job-lively").disabled = state === "running";
+  card.node.querySelector(".job-lang").disabled = state === "running";
+  if (state === "running") card.node.querySelector(".job-note").hidden = true;
   refreshActions(card);
 }
 
 /**
- * Кнопка у готового видео: тот же голос — «Перевести заново» (ещё один запрос, вдруг выйдет лучше);
- * голос переключили после перевода — «Пересоздать» другим голосом.
+ * Кнопка у готового видео: те же голос и язык — «Перевести заново» (ещё один запрос, вдруг выйдет
+ * лучше); голос или язык поменяли после перевода — «Пересоздать» с новыми.
  */
 function refreshActions(card) {
   const finished = ["done", "error", "cancelled"].includes(card.state);
@@ -155,10 +197,14 @@ function refreshActions(card) {
   if (!finished) return;
   const btn = card.node.querySelector(".job-retranslate");
   const hint = card.node.querySelector(".job-hint");
-  const voiceChanged = card.state === "done" && card.voiceUsed !== null && card.lively !== card.voiceUsed;
-  if (voiceChanged) {
-    btn.textContent = `Пересоздать: ${card.lively ? "живые" : "обычные"} голоса`;
-    hint.textContent = "";
+  const done = card.state === "done" && card.voiceUsed !== null;
+  const voiceChanged = done && card.lively !== card.voiceUsed;
+  const langChanged = done && card.langUsed !== null && card.lang !== card.langUsed;
+  if (voiceChanged || langChanged) {
+    const parts = [`${card.lively ? "живые" : "обычные"} голоса`];
+    if (langChanged) parts.push(langName(card.lang).toLowerCase());
+    btn.textContent = `Пересоздать: ${parts.join(" · ")}`;
+    hint.textContent = "Новый перевод с выбранными голосом и языком, прежний файл останется";
   } else {
     btn.textContent = card.state === "done" ? "Перевести заново" : "Попробовать снова";
     hint.textContent = card.state === "done" ? "Новый запрос к Яндексу — иногда второй перевод выходит лучше" : "";
@@ -221,6 +267,7 @@ api.on("job:update", (u) => {
 function applyUpdate(card, u) {
   if (u.reset) resetSteps(card);
   if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
+  if (u.langUsed !== undefined) card.langUsed = u.langUsed;
   if (u.state && !u.step) setState(card, u.state);
   if (u.step) updateStep(card, u);
   if (u.outputs) showOutputs(card, u.outputs);
@@ -244,6 +291,7 @@ function renderFolder(dir) {
 }
 
 async function initSettings() {
+  fillLangSelect($("settingsLang"));
   const s = await api.getSettings();
   for (const el of document.querySelectorAll("[data-setting]")) {
     const key = el.dataset.setting;
@@ -265,6 +313,19 @@ function syncDependent() {
   $("voiceGainVal").textContent = `${Math.round(gain * 100)}%`;
   const saveVideo = document.querySelector('[data-setting="saveVideo"]').checked;
   document.querySelector('[data-setting="embedSubs"]').disabled = !saveVideo;
+
+  // с живыми голосами язык всегда английский: показываем его, а сохранённый выбор
+  // (для видео без живых голосов) возвращаем, когда их выключат
+  const lively = document.querySelector('[data-setting="livelyVoice"]').checked;
+  const langSel = $("settingsLang");
+  if (lively && !langSel.disabled) {
+    langSel.dataset.saved = langSel.value;
+    langSel.value = LIVELY_LANG;
+    langSel.disabled = true;
+  } else if (!lively && langSel.disabled) {
+    langSel.value = langSel.dataset.saved ?? "auto";
+    langSel.disabled = false;
+  }
 }
 
 $("pickFolder").onclick = async () => {
@@ -276,5 +337,7 @@ $("resetFolder").onclick = async () => renderFolder((await api.setSettings({ out
 // ---------- старт ----------
 const info = await api.info();
 STEPS = info.steps;
+LANGS = info.languages;
+LIVELY_LANG = info.livelyLang;
 await initSettings();
 await refreshAccount();
