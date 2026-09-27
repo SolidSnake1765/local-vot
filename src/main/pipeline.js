@@ -11,7 +11,7 @@ export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
   { id: "upload", title: "Загрузка на Яндекс Диск" },
   { id: "translate", title: "Перевод" },
-  { id: "cleanup", title: "Удаление с Диска" },
+  { id: "cleanup", title: "Закрытие ссылки" },
   { id: "save", title: "Сохранение результата" },
 ];
 
@@ -30,11 +30,16 @@ const fmtSec = (s) => (s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${Stri
 const DISK_BYTES_PER_SEC = 130_000; // замерено: API Диска принимает ~127 КБ/с независимо от канала
 
 /**
+ * Копия на Диске живёт дольше одного перевода: job.diskPath сохраняется, чтобы «Перевести заново»
+ * и смена голоса не грузили файл повторно. Убирает её main.js (при удалении из списка и выходе).
+ *
+ * @param job   { id, file, lively, diskPath?, duration? } — diskPath/duration заполняются здесь
  * @param emit  ({ step, state?: "active"|"done"|"error", progress?: 0..1, detail?: string }) — ход работы
- * @returns список созданных файлов
+ * @returns { outputs: string[], lively: boolean } — созданные файлы и каким голосом вышел перевод
  */
-export async function runJob({ id, file, options, token }, emit, signal) {
-  const work = path.join(app.getPath("temp"), "local-vot", id);
+export async function runJob(job, { options, token }, emit, signal) {
+  const { file } = job;
+  const work = path.join(app.getPath("temp"), "local-vot", `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
   const outDir = options.outputDir || path.dirname(file);
@@ -45,13 +50,55 @@ export async function runJob({ id, file, options, token }, emit, signal) {
   };
 
   try {
-    step("light", { state: "active", detail: "Проверяем видео" });
-    const { duration } = await probe(file);
-    const light = path.join(work, "light.mp4");
-    await makeLight(file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal);
-    step("light", { state: "done", detail: "" });
+    if (job.diskPath) {
+      emit({ step: "light", state: "done", detail: "" });
+      emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
+    } else {
+      await uploadCopy(job, work, token, step, signal);
+    }
 
-    step("upload", { state: "active", detail: "Готовим загрузку" });
+    const { result, lively } = await translateOnce(job, work, token, step, emit, signal);
+
+    step("save", { state: "active", detail: "" });
+    mkdirSync(outDir, { recursive: true });
+    const outputs = [];
+    const tag = lively ? "RU живые" : "RU";
+    if (options.saveVideo) {
+      const out = freePath(path.join(outDir, `${name} [${tag}].mkv`));
+      await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, job.duration,
+        (p) => step("save", { progress: p, detail: `Собираем видео · ${Math.round(p * 100)}%` }), signal);
+      outputs.push(out);
+    }
+    if (options.saveAudio) {
+      const out = freePath(path.join(outDir, `${name} [${tag}].mp3`));
+      copyFileSync(result.audio, out);
+      outputs.push(out);
+    }
+    if (options.saveSubs && result.subs) {
+      const out = freePath(path.join(outDir, `${name} [RU].srt`));
+      copyFileSync(result.subs, out);
+      outputs.push(out);
+    }
+    step("save", { state: "done", detail: "" });
+    return { outputs, lively };
+  } catch (e) {
+    if (current) emit({ step: current, state: "error", detail: e.message });
+    throw e;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/** Облегчённая копия и загрузка её на Диск; заполняет job.diskPath и job.duration. */
+async function uploadCopy(job, work, token, step, signal) {
+  step("light", { state: "active", detail: "Проверяем видео" });
+  const { duration } = await probe(job.file);
+  job.duration = duration;
+  const light = path.join(work, "light.mp4");
+  await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal);
+  step("light", { state: "done", detail: "" });
+
+  step("upload", { state: "active", detail: "Готовим загрузку" });
     // Диск принимает файл со скоростью ~127 КБ/с. Сколько байт ушло из программы — не показатель:
     // сеть и VPN-клиент забирают в буфер десятки мегабайт сразу, а потом отправляют медленно.
     // Поэтому ход загрузки показываем по таймеру, по оценке этой скорости.
@@ -68,68 +115,57 @@ export async function runJob({ id, file, options, token }, emit, signal) {
     };
     tick();
     const timer = setInterval(tick, 1000);
-    let diskPath;
-    try {
-      diskPath = await disk.upload(token, light, null, signal);
-    } finally {
-      clearInterval(timer);
-    }
-    step("upload", { state: "done", detail: `${mb(statSync(light).size)} МБ за ${fmtSec(Math.round((Date.now() - t0) / 1000))}` });
-
-    let result;
-    try {
-      step("translate", { state: "active", detail: "Открываем доступ к файлу" });
-      const url = await disk.publish(token, diskPath, signal);
-      const onStatus = (msg) => step("translate", { detail: msg });
-      const base = path.join(work, "yandex");
-      let voice = options.livelyVoice ? "живые голоса" : "обычные голоса";
-      try {
-        result = await translate(url, duration, base, onStatus, signal, { lively: options.livelyVoice, token });
-      } catch (e) {
-        if (!options.livelyVoice || signal.aborted) throw e;
-        // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
-        onStatus("Живые голоса не получились, переводим обычными");
-        voice = "обычные голоса";
-        result = await translate(url, duration, base, onStatus, signal);
-      }
-      step("translate", {
-        state: "done",
-        detail: [voice[0].toUpperCase() + voice.slice(1), result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
-      });
-    } finally {
-      // что бы ни случилось — не оставляем файл висеть по открытой ссылке
-      emit({ step: "cleanup", state: "active", detail: "" });
-      await disk.unpublish(token, diskPath).catch(() => {});
-      await disk.remove(token, diskPath, { permanently: options.deletePermanently })
-        .then(() => emit({ step: "cleanup", state: "done", detail: options.deletePermanently ? "Удалено" : "В Корзине Диска" }))
-        .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось удалить: ${e.message}` }));
-    }
-
-    step("save", { state: "active", detail: "" });
-    mkdirSync(outDir, { recursive: true });
-    const outputs = [];
-    if (options.saveVideo) {
-      const out = freePath(path.join(outDir, `${name} [RU].mkv`));
-      await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, duration,
-        (p) => step("save", { progress: p, detail: `Собираем видео · ${Math.round(p * 100)}%` }), signal);
-      outputs.push(out);
-    }
-    if (options.saveAudio) {
-      const out = freePath(path.join(outDir, `${name}.ru.mp3`));
-      copyFileSync(result.audio, out);
-      outputs.push(out);
-    }
-    if (options.saveSubs && result.subs) {
-      const out = freePath(path.join(outDir, `${name}.ru.srt`));
-      copyFileSync(result.subs, out);
-      outputs.push(out);
-    }
-    step("save", { state: "done", detail: "" });
-    return outputs;
-  } catch (e) {
-    if (current) emit({ step: current, state: "error", detail: e.message });
-    throw e;
+  try {
+    job.diskPath = await disk.upload(token, light, null, signal);
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    clearInterval(timer);
   }
+  step("upload", { state: "done", detail: `${mb(size)} МБ за ${fmtSec(Math.round((Date.now() - t0) / 1000))}` });
+}
+
+/**
+ * Один запрос перевода. Каждый раз — новая публичная ссылка: Яндекс кэширует перевод по ссылке
+ * (bypassCache не помогает), а после переопубликации Диск выдаёт новую, и перевод делается заново.
+ */
+async function translateOnce(job, work, token, step, emit, signal) {
+  const onStatus = (msg) => step("translate", { detail: msg });
+  const base = path.join(work, "yandex");
+  let lively = Boolean(job.lively);
+  let result;
+  try {
+    step("translate", { state: "active", detail: "Открываем доступ к файлу" });
+    await disk.unpublish(token, job.diskPath).catch(() => {}); // вдруг осталась открытой с прошлого раза
+    let url;
+    try {
+      url = await disk.publish(token, job.diskPath, signal);
+    } catch (e) {
+      if (/\(404\)|не найден/i.test(e.message)) {
+        job.diskPath = null; // копию удалили с Диска вручную — в следующий раз загрузим заново
+        throw new Error("Копия пропала с Диска — нажмите «Перевести заново», файл загрузится ещё раз");
+      }
+      throw e;
+    }
+    try {
+      result = await translate(url, job.duration, base, onStatus, signal, { lively, token });
+    } catch (e) {
+      if (!lively || signal.aborted) throw e;
+      // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
+      onStatus("Живые голоса не получились, переводим обычными");
+      lively = false;
+      result = await translate(url, job.duration, base, onStatus, signal);
+    }
+    step("translate", {
+      state: "done",
+      detail: [lively ? "Живые голоса" : "Обычные голоса", result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
+    });
+  } finally {
+    // что бы ни случилось — не оставляем файл висеть по открытой ссылке
+    if (job.diskPath) {
+      emit({ step: "cleanup", state: "active", detail: "" });
+      await disk.unpublish(token, job.diskPath)
+        .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске до выхода из приложения" }))
+        .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
+    }
+  }
+  return { result, lively };
 }

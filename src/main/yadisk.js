@@ -80,6 +80,16 @@ export async function unpublish(token, diskPath) {
   await api(token, "PUT", "/resources/unpublish", { path: diskPath });
 }
 
+/** Файлы в папке приложения на Диске (там лежат только наши копии). */
+export async function listAppFolder(token) {
+  try {
+    const data = await api(token, "GET", "/resources", { path: "app:/", limit: "200", fields: "_embedded.items.path" });
+    return (data._embedded?.items ?? []).map((i) => i.path);
+  } catch {
+    return []; // папки ещё нет — значит, и убирать нечего
+  }
+}
+
 /** Удаляет файл: в Корзину Диска или насовсем. */
 export async function remove(token, diskPath, { permanently = false } = {}) {
   const data = await api(token, "DELETE", "/resources", { path: diskPath, permanently: String(permanently) });

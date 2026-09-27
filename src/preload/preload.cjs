@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld("api", {
 
   addJobs: (files) => ipcRenderer.invoke("jobs:add", files),
   cancelJob: (id) => ipcRenderer.invoke("jobs:cancel", id),
+  setJobVoice: (id, lively) => ipcRenderer.invoke("jobs:setVoice", id, lively),
+  retranslate: (id) => ipcRenderer.invoke("jobs:retranslate", id),
+  removeJob: (id) => ipcRenderer.invoke("jobs:remove", id),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
 
   // путь к файлу, брошенному в окно (с Electron 32 File.path больше нет)

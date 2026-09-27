@@ -35,7 +35,9 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
     signal?.throwIfAborted();
     try {
       // extraOpts.firstRequest не трогать: Яндекс принимает только true (значение по умолчанию),
-      // с false повторные запросы падают с «error_id ... see logs»
+      // с false повторные запросы падают с «error_id ... see logs».
+      // bypassCache бесполезен: Яндекс всё равно отдаёт кэш по ссылке (проверено) — для свежего
+      // перевода нужна новая ссылка, её даёт переопубликация файла на Диске
       res = await client.translateVideo({ videoData, extraOpts });
       errors = 0;
     } catch (e) {

@@ -105,10 +105,28 @@ function createCard(job) {
     ol.append(li);
     steps[s.id] = li;
   }
+  const card = { id: job.id, node, steps, state: job.state, lively: job.lively, voiceUsed: job.voiceUsed ?? null };
+
+  const toggle = node.querySelector(".job-lively");
+  toggle.checked = Boolean(job.lively);
+  toggle.onchange = () => {
+    card.lively = toggle.checked;
+    api.setJobVoice(job.id, card.lively);
+    refreshActions(card);
+  };
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
+  node.querySelector(".job-retranslate").onclick = () => api.retranslate(job.id);
+  node.querySelector(".job-remove").onclick = async () => {
+    if (await api.removeJob(job.id)) {
+      node.remove();
+      cards.delete(job.id);
+      $("emptyHint").hidden = cards.size > 0;
+      updateCount();
+    }
+  };
+
   $("emptyHint").hidden = true;
   $("jobs").prepend(node);
-  const card = { node, steps };
   cards.set(job.id, card);
   setState(card, job.state);
   for (const u of early.get(job.id) ?? []) applyUpdate(card, u);
@@ -116,10 +134,45 @@ function createCard(job) {
 }
 
 function setState(card, state) {
+  card.state = state;
   const badge = card.node.querySelector(".badge");
   badge.textContent = STATE_LABEL[state] ?? state;
   badge.className = `badge ${state}`;
-  card.node.querySelector(".job-cancel").hidden = !["queued", "running"].includes(state);
+  const active = ["queued", "running"].includes(state);
+  card.node.querySelector(".job-cancel").hidden = !active;
+  // пока идёт перевод, голос уже выбран — переключатель заморожен
+  card.node.querySelector(".job-lively").disabled = state === "running";
+  refreshActions(card);
+}
+
+/**
+ * Кнопка у готового видео: тот же голос — «Перевести заново» (ещё один запрос, вдруг выйдет лучше);
+ * голос переключили после перевода — «Пересоздать» другим голосом.
+ */
+function refreshActions(card) {
+  const finished = ["done", "error", "cancelled"].includes(card.state);
+  card.node.querySelector(".job-actions").hidden = !finished;
+  if (!finished) return;
+  const btn = card.node.querySelector(".job-retranslate");
+  const hint = card.node.querySelector(".job-hint");
+  const voiceChanged = card.state === "done" && card.voiceUsed !== null && card.lively !== card.voiceUsed;
+  if (voiceChanged) {
+    btn.textContent = `Пересоздать: ${card.lively ? "живые" : "обычные"} голоса`;
+    hint.textContent = "";
+  } else {
+    btn.textContent = card.state === "done" ? "Перевести заново" : "Попробовать снова";
+    hint.textContent = card.state === "done" ? "Новый запрос к Яндексу — иногда второй перевод выходит лучше" : "";
+  }
+}
+
+/** Повторный запуск: шаги снова «не начаты», прежние результаты остаются в списке. */
+function resetSteps(card) {
+  for (const li of Object.values(card.steps)) {
+    li.classList.remove("active", "done", "error");
+    li.querySelector(".step-detail").textContent = "";
+    li.querySelector(".bar").hidden = true;
+  }
+  card.node.querySelector(".job-error").hidden = true;
 }
 
 function updateStep(card, { step, state, progress, detail }) {
@@ -166,6 +219,8 @@ api.on("job:update", (u) => {
 });
 
 function applyUpdate(card, u) {
+  if (u.reset) resetSteps(card);
+  if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
   if (u.state && !u.step) setState(card, u.state);
   if (u.step) updateStep(card, u);
   if (u.outputs) showOutputs(card, u.outputs);

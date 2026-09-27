@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
 import { loadSettings, saveSettings } from "./config.js";
+import * as disk from "./yadisk.js";
 import { runJob, STEPS } from "./pipeline.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -14,13 +15,23 @@ let win = null;
 const send = (channel, payload) => win?.webContents.send(channel, payload);
 
 // ---------- очередь: задания выполняются по одному ----------
-const jobs = new Map(); // id → { id, file, name, state, controller }
+// job: { id, file, name, state, controller, lively, diskPath, duration, voiceUsed }
+// diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
+const jobs = new Map();
 const queue = [];
 let running = false;
-let currentRun = null; // промис текущего задания — при выходе ждём его уборку на Диске
+let currentRun = null; // промис текущего задания — при выходе ждём, пока оно закроет ссылку
 
 function publicJob(j) {
-  return { id: j.id, file: j.file, name: j.name, state: j.state };
+  return { id: j.id, file: j.file, name: j.name, state: j.state, lively: j.lively, voiceUsed: j.voiceUsed };
+}
+
+function enqueue(job) {
+  job.controller = new AbortController();
+  job.state = "queued";
+  queue.push(job);
+  send("job:update", { id: job.id, state: "queued", reset: true });
+  queueMicrotask(pump);
 }
 
 async function pump() {
@@ -33,14 +44,12 @@ async function pump() {
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
-    currentRun = runJob(
-      { id: job.id, file: job.file, options: loadSettings(), token },
-      (patch) => send("job:update", { id: job.id, ...patch }),
-      job.controller.signal,
-    );
-    const outputs = await currentRun;
+    currentRun = runJob(job, { options: loadSettings(), token },
+      (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
+    const { outputs, lively } = await currentRun;
     job.state = "done";
-    send("job:update", { id: job.id, state: "done", outputs });
+    job.voiceUsed = lively;
+    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "" });
@@ -51,27 +60,57 @@ async function pump() {
   }
 }
 
-/** Останавливает всё и ждёт, пока текущее задание уберёт файл с Диска (не дольше 20 с). */
-async function stopAll() {
-  queue.length = 0;
-  for (const j of jobs.values()) j.controller.abort();
-  if (currentRun) {
-    await Promise.race([currentRun.catch(() => {}), new Promise((r) => setTimeout(r, 20_000))]);
-  }
-}
-
 function addJobs(files) {
+  const lively = loadSettings().livelyVoice;
   const added = [];
   for (const file of files) {
     const ext = path.extname(file).slice(1).toLowerCase();
     if (!VIDEO_EXT.includes(ext)) continue;
-    const job = { id: randomUUID(), file, name: path.basename(file), state: "queued", controller: new AbortController() };
+    const job = { id: randomUUID(), file, name: path.basename(file), state: "queued", controller: new AbortController(),
+      lively, diskPath: null, duration: null, voiceUsed: null };
     jobs.set(job.id, job);
     queue.push(job);
     added.push(publicJob(job));
   }
   queueMicrotask(pump);
   return added;
+}
+
+// ---------- копии на Диске ----------
+async function removeDiskCopy(job) {
+  if (!job.diskPath) return;
+  const diskPath = job.diskPath;
+  job.diskPath = null;
+  const token = await auth.getToken().catch(() => null);
+  if (!token) return;
+  const { deletePermanently } = loadSettings();
+  await disk.unpublish(token, diskPath).catch(() => {});
+  await disk.remove(token, diskPath, { permanently: deletePermanently }).catch(() => {});
+}
+
+/** Останавливает всё, ждёт текущее задание (не дольше 20 с) и убирает копии с Диска. */
+async function shutdown() {
+  queue.length = 0;
+  for (const j of jobs.values()) j.controller.abort();
+  if (currentRun) {
+    await Promise.race([currentRun.catch(() => {}), new Promise((r) => setTimeout(r, 20_000))]);
+  }
+  await Promise.race([
+    Promise.all([...jobs.values()].map(removeDiskCopy)),
+    new Promise((r) => setTimeout(r, 20_000)),
+  ]);
+}
+
+/** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи). */
+async function purgeLeftovers() {
+  const token = await auth.getToken().catch(() => null);
+  if (!token) return;
+  const { deletePermanently } = loadSettings();
+  const inUse = new Set([...jobs.values()].map((j) => j.diskPath).filter(Boolean));
+  for (const p of await disk.listAppFolder(token)) {
+    if (inUse.has(p)) continue;
+    await disk.remove(token, p, { permanently: deletePermanently }).catch(() => {});
+  }
 }
 
 // ---------- IPC ----------
@@ -96,6 +135,7 @@ ipcMain.handle("auth:login", async () => {
       send("auth:code", code);
       shell.openExternal(code.url);
     }, loginController.signal);
+    purgeLeftovers();
     return { ok: true, status: await authStatus() };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -139,14 +179,32 @@ ipcMain.handle("jobs:cancel", (_e, id) => {
     send("job:update", { id, state: "cancelled" });
   }
 });
+// голос для видео: пока перевод не начался — просто запоминаем; после — интерфейс предложит пересоздать
+ipcMain.handle("jobs:setVoice", (_e, id, lively) => {
+  const job = jobs.get(id);
+  if (job) job.lively = Boolean(lively);
+});
+// ещё один запрос к Яндексу (новая ссылка → свежий перевод) текущим голосом видео
+ipcMain.handle("jobs:retranslate", (_e, id) => {
+  const job = jobs.get(id);
+  if (!job || !["done", "error", "cancelled"].includes(job.state)) return;
+  enqueue(job);
+});
+ipcMain.handle("jobs:remove", async (_e, id) => {
+  const job = jobs.get(id);
+  if (!job || ["queued", "running"].includes(job.state)) return false;
+  jobs.delete(id);
+  removeDiskCopy(job);
+  return true;
+});
 ipcMain.handle("shell:showItem", (_e, p) => shell.showItemInFolder(p));
 
 // ---------- окно ----------
 function createWindow() {
   win = new BrowserWindow({
-    width: 1040,
-    height: 760,
-    minWidth: 760,
+    width: 1080,
+    height: 780,
+    minWidth: 780,
     minHeight: 560,
     title: "Local VOT",
     icon: path.join(ROOT, "assets", "icon-512.png"),
@@ -164,28 +222,34 @@ function createWindow() {
   win.webContents.on("will-navigate", (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
-  // закрытие посреди перевода: спросить и дать заданию убрать файл с Диска
+  // при закрытии: спросить, если идёт перевод, и убрать копии с Диска
   let closing = false;
   win.on("close", async (e) => {
-    if (closing || (!running && queue.length === 0)) return;
+    const hasCopies = [...jobs.values()].some((j) => j.diskPath);
+    if (closing || (!running && queue.length === 0 && !hasCopies)) return;
     e.preventDefault();
-    const { response } = await dialog.showMessageBox(win, {
-      type: "question",
-      buttons: ["Закрыть", "Продолжить перевод"],
-      defaultId: 1,
-      cancelId: 1,
-      title: "Local VOT",
-      message: "Идёт перевод. Закрыть приложение?",
-      detail: "Перевод прервётся, загруженная копия будет удалена с Яндекс Диска.",
-    });
-    if (response !== 0) return;
+    if (running || queue.length) {
+      const { response } = await dialog.showMessageBox(win, {
+        type: "question",
+        buttons: ["Закрыть", "Продолжить перевод"],
+        defaultId: 1,
+        cancelId: 1,
+        title: "Local VOT",
+        message: "Идёт перевод. Закрыть приложение?",
+        detail: "Перевод прервётся, загруженные копии будут удалены с Яндекс Диска.",
+      });
+      if (response !== 0) return;
+    }
     closing = true;
-    win.setTitle("Local VOT — убираем файл с Диска…");
-    await stopAll();
+    win.setTitle("Local VOT — убираем файлы с Диска…");
+    await shutdown();
     win.close();
   });
   win.on("closed", () => { win = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  purgeLeftovers();
+});
 app.on("window-all-closed", () => app.quit());
