@@ -80,6 +80,12 @@ export async function unpublish(token, diskPath) {
   await api(token, "PUT", "/resources/unpublish", { path: diskPath });
 }
 
+/** Свободное место на Яндекс Диске, байт. */
+export async function freeSpace(token, signal) {
+  const d = await api(token, "GET", "", { fields: "total_space,used_space" }, signal);
+  return d.total_space - d.used_space;
+}
+
 /** Файлы в папке приложения на Диске (там лежат только наши копии). */
 export async function listAppFolder(token) {
   try {

@@ -1,7 +1,7 @@
 // Одно задание перевода: видео → облегчённая копия → Диск → перевод Яндекса →
 // убрать файл с Диска → сохранить результат рядом с видео (или в выбранную папку).
 import { app } from "electron";
-import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, statfsSync, statSync } from "node:fs";
 import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
@@ -26,7 +26,6 @@ function freePath(p) {
   }
 }
 
-const mb = (b) => (b / 1024 / 1024).toFixed(1);
 const fmtSec = (s) => (s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${String(s % 60).padStart(2, "0")} с`);
 const DISK_BYTES_PER_SEC = 130_000; // замерено: API Диска принимает ~127 КБ/с независимо от канала
 
@@ -60,25 +59,36 @@ export async function runJob(job, { options, token }, emit, signal) {
 
     const { result, lively, lang } = await translateOnce(job, work, token, step, emit, signal);
 
-    step("save", { state: "active", detail: "" });
+    step("save", { state: "active", detail: "Проверяем место на диске" });
     mkdirSync(outDir, { recursive: true });
+    const srcSize = statSync(file).size;
+    // видео копируется без перекодирования — итог весит примерно как исходник
+    ensureSpace(outDir, (options.saveVideo ? srcSize * 1.02 : 0) + 100 * MB,
+      options.saveVideo ? "для видео с переводом" : "для файлов перевода");
+
     const outputs = [];
     const tag = lively ? "RU живые" : "RU";
-    if (options.saveVideo) {
-      const out = freePath(path.join(outDir, `${name} [${tag}].mkv`));
-      await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, job.duration,
-        (p) => step("save", { progress: p, detail: `Собираем видео · ${Math.round(p * 100)}%` }), signal);
-      outputs.push(out);
-    }
-    if (options.saveAudio) {
-      const out = freePath(path.join(outDir, `${name} [${tag}].mp3`));
-      copyFileSync(result.audio, out);
-      outputs.push(out);
-    }
-    if (options.saveSubs && result.subs) {
-      const out = freePath(path.join(outDir, `${name} [RU].srt`));
-      copyFileSync(result.subs, out);
-      outputs.push(out);
+    let pending = null; // файл, который пишется прямо сейчас, — при сбое или отмене удаляем
+    try {
+      if (options.saveVideo) {
+        pending = freePath(path.join(outDir, `${name} [${tag}].mkv`));
+        await muxWithProgress(file, result, pending, options, job.duration, srcSize, step, signal);
+        outputs.push(pending);
+      }
+      if (options.saveAudio) {
+        pending = freePath(path.join(outDir, `${name} [${tag}].mp3`));
+        copyFileSync(result.audio, pending);
+        outputs.push(pending);
+      }
+      if (options.saveSubs && result.subs) {
+        pending = freePath(path.join(outDir, `${name} [RU].srt`));
+        copyFileSync(result.subs, pending);
+        outputs.push(pending);
+      }
+      pending = null;
+    } catch (e) {
+      if (pending) rmSync(pending, { force: true });
+      throw diskFullError(e) ?? e;
     }
     step("save", { state: "done", detail: "" });
     return { outputs, lively, lang };
@@ -90,38 +100,108 @@ export async function runJob(job, { options, token }, emit, signal) {
   }
 }
 
+/** Сборка видео с прогрессом: проценты по времени ffmpeg, записанный объём и скорость — по размеру файла. */
+async function muxWithProgress(file, result, out, options, duration, srcSize, step, signal) {
+  const t0 = Date.now();
+  let p = 0;
+  let lastBytes = 0;
+  let lastT = t0;
+  let speed = 0;
+  const tick = () => {
+    const now = Date.now();
+    let bytes = lastBytes;
+    try { bytes = statSync(out).size; } catch { /* файл ещё не создан */ }
+    const inst = (bytes - lastBytes) / Math.max(0.001, (now - lastT) / 1000);
+    speed = speed ? speed * 0.7 + inst * 0.3 : inst; // сглаживаем, чтобы цифра не прыгала
+    lastBytes = bytes;
+    lastT = now;
+    const elapsed = (now - t0) / 1000;
+    const eta = p > 0.02 ? Math.ceil((elapsed * (1 - p)) / p) : null;
+    step("save", {
+      progress: p,
+      detail: [`Собираем видео · ${Math.round(p * 100)}%`, `${size(bytes)} из ~${size(srcSize)}`,
+        `${(speed / MB).toFixed(0)} МБ/с`, eta !== null ? `осталось ~${fmtSec(eta)}` : ""].filter(Boolean).join(" · "),
+    });
+  };
+  const timer = setInterval(tick, 1000);
+  try {
+    await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, duration, (x) => { p = x; }, signal);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+const size = (b) => (b >= GB ? `${(b / GB).toFixed(1)} ГБ` : `${Math.round(b / MB)} МБ`);
+
+function freeBytes(dir) {
+  try {
+    const s = statfsSync(dir);
+    return s.bavail * s.bsize;
+  } catch {
+    return Infinity; // не узнали — не мешаем, при нехватке сработает diskFullError
+  }
+}
+
+/** Заранее проверяет место, чтобы не упасть посреди многогигабайтной записи. */
+function ensureSpace(dir, needed, what) {
+  const free = freeBytes(dir);
+  if (free >= needed) return;
+  throw new Error(`Не хватает места на диске ${path.parse(path.resolve(dir)).root}: ${what} нужно ~${size(needed)}, `
+    + `свободно ${size(free)}. Выберите другую папку в настройках «Куда» или освободите место.`);
+}
+
+/** Ошибка «кончилось место» посреди записи → понятное сообщение (иначе null). */
+function diskFullError(e) {
+  if (!/ENOSPC|No space left|not enough space|недостаточно места/i.test(`${e.code ?? ""} ${e.message}`)) return null;
+  return new Error("На диске закончилось место во время сохранения. Недособранный файл удалён. "
+    + "Выберите папку на другом диске в настройках «Куда» или освободите место и нажмите «Перевести заново».");
+}
+
 /** Облегчённая копия и загрузка её на Диск; заполняет job.diskPath и job.duration. */
 async function uploadCopy(job, work, token, step, signal) {
   step("light", { state: "active", detail: "Проверяем видео" });
   const { duration } = await probe(job.file);
   job.duration = duration;
+  // облегчённая копия ≈ звук 128 кбит/с + чёрный кадр: ~20 КБ на секунду видео
+  ensureSpace(work, duration * 20_000 + 50 * MB, "для временной облегчённой копии");
   const light = path.join(work, "light.mp4");
-  await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal);
+  try {
+    await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal);
+  } catch (e) {
+    throw diskFullError(e) ?? e;
+  }
   step("light", { state: "done", detail: "" });
 
-  step("upload", { state: "active", detail: "Готовим загрузку" });
-    // Диск принимает файл со скоростью ~127 КБ/с. Сколько байт ушло из программы — не показатель:
-    // сеть и VPN-клиент забирают в буфер десятки мегабайт сразу, а потом отправляют медленно.
-    // Поэтому ход загрузки показываем по таймеру, по оценке этой скорости.
-    const size = statSync(light).size;
-    const expectedSec = size / DISK_BYTES_PER_SEC;
-    const t0 = Date.now();
-    const tick = () => {
-      const elapsed = (Date.now() - t0) / 1000;
-      const left = Math.max(0, Math.ceil(expectedSec - elapsed));
-      step("upload", {
-        progress: Math.min(0.99, elapsed / expectedSec),
-        detail: `${mb(size)} МБ · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
-      });
-    };
-    tick();
-    const timer = setInterval(tick, 1000);
+  step("upload", { state: "active", detail: "Проверяем место на Яндекс Диске" });
+  const lightSize = statSync(light).size;
+  const diskFree = await disk.freeSpace(token, signal).catch(() => Infinity);
+  if (diskFree < lightSize + 10 * MB) {
+    throw new Error(`На Яндекс Диске не хватает места: нужно ~${size(lightSize)}, свободно ${size(diskFree)}. `
+      + "Освободите место на Диске (и очистите его Корзину) и нажмите «Попробовать снова».");
+  }
+  // Диск принимает файл со скоростью ~127 КБ/с. Сколько байт ушло из программы — не показатель:
+  // сеть и VPN-клиент забирают в буфер десятки мегабайт сразу, а потом отправляют медленно.
+  // Поэтому ход загрузки показываем по таймеру, по оценке этой скорости.
+  const expectedSec = lightSize / DISK_BYTES_PER_SEC;
+  const t0 = Date.now();
+  const tick = () => {
+    const elapsed = (Date.now() - t0) / 1000;
+    const left = Math.max(0, Math.ceil(expectedSec - elapsed));
+    step("upload", {
+      progress: Math.min(0.99, elapsed / expectedSec),
+      detail: `${size(lightSize)} · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
+    });
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
   try {
     job.diskPath = await disk.upload(token, light, null, signal);
   } finally {
     clearInterval(timer);
   }
-  step("upload", { state: "done", detail: `${mb(size)} МБ за ${fmtSec(Math.round((Date.now() - t0) / 1000))}` });
+  step("upload", { state: "done", detail: `${size(lightSize)} за ${fmtSec(Math.round((Date.now() - t0) / 1000))}` });
 }
 
 /**
