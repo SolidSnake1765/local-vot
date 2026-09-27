@@ -1,0 +1,7 @@
+node_modules/
+out/
+*.mp4
+*.mkv
+*.mp3
+*.wav
+.env
