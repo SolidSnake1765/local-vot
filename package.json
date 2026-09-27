@@ -1,16 +1,20 @@
 {
   "name": "local-vot",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "productName": "Local VOT",
+  "version": "0.1.0",
+  "description": "Закадровый перевод локальных видео через переводчик Яндекса",
+  "main": "src/main/main.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "electron ."
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "author": "SolidSnake1765",
+  "license": "MIT",
   "dependencies": {
-    "@vot.js/node": "^3.1.4"
+    "@vot.js/node": "^3.1.4",
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5"
   }
 }

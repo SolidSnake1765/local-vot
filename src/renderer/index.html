@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+  <title>Local VOT</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="../../assets/icon.svg" alt="" class="logo">
+      <div>
+        <div class="brand-name">Local VOT</div>
+        <div class="brand-sub">Закадровый перевод видео с английского</div>
+      </div>
+    </div>
+    <div class="account" id="account">
+      <span class="account-text" id="accountText">Проверяем вход…</span>
+      <button class="btn btn-ghost" id="accountBtn" hidden></button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="work">
+      <button class="dropzone" id="dropzone" type="button">
+        <span class="dz-icon" aria-hidden="true">＋</span>
+        <span class="dz-title">Перетащите видео сюда</span>
+        <span class="dz-sub">или нажмите, чтобы выбрать файлы · MP4, MKV, MOV, AVI, WebM</span>
+      </button>
+
+      <div class="jobs-head">
+        <h2>Очередь</h2>
+        <span class="muted" id="jobsCount"></span>
+      </div>
+      <div class="jobs" id="jobs">
+        <p class="empty" id="emptyHint">Пока пусто. Добавьте видео — перевод начнётся сразу.</p>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h2>Что сохранить</h2>
+      <label class="check"><input type="checkbox" data-setting="saveVideo"> Видео с переводом <span class="muted">.mkv</span></label>
+      <label class="check sub"><input type="checkbox" data-setting="embedSubs"> Вшить русские субтитры</label>
+      <label class="check"><input type="checkbox" data-setting="saveAudio"> Дорожку перевода отдельно <span class="muted">.mp3</span></label>
+      <label class="check"><input type="checkbox" data-setting="saveSubs"> Субтитры отдельно <span class="muted">.srt</span></label>
+
+      <h2>Куда</h2>
+      <div class="folder">
+        <span class="folder-path" id="outputDir">Рядом с исходным видео</span>
+        <div class="folder-btns">
+          <button class="btn btn-small" id="pickFolder" type="button">Выбрать…</button>
+          <button class="btn btn-small btn-ghost" id="resetFolder" type="button" hidden>Сбросить</button>
+        </div>
+      </div>
+
+      <h2>Звук</h2>
+      <label class="range">
+        <span>Громкость перевода <b id="voiceGainVal"></b></span>
+        <input type="range" min="0.5" max="2" step="0.1" data-setting="voiceGain">
+      </label>
+      <label class="select">
+        <span>Приглушать оригинал под переводом</span>
+        <select data-setting="duck">
+          <option value="light">Слабо</option>
+          <option value="medium">Средне</option>
+          <option value="strong">Сильно</option>
+        </select>
+      </label>
+
+      <h2>Яндекс Диск</h2>
+      <label class="check"><input type="checkbox" data-setting="deletePermanently"> Удалять копию с Диска сразу, мимо Корзины</label>
+      <p class="note">Через Диск видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром), после перевода файл удаляется. Диск ограничивает скорость загрузки — около 2–3 минут на 20 минут видео.</p>
+    </aside>
+  </main>
+
+  <div class="modal" id="loginModal" hidden>
+    <div class="modal-card">
+      <h2>Вход в Яндекс</h2>
+      <div id="loginWait">
+        <div class="spinner big"></div>
+        <p class="muted">Получаем код…</p>
+      </div>
+      <div id="loginCode" hidden>
+        <p>Откройте страницу Яндекса, введите код и нажмите «Разрешить»:</p>
+        <div class="code" id="codeText"></div>
+        <div class="modal-btns">
+          <button class="btn" id="openCodePage" type="button">Открыть страницу</button>
+          <button class="btn btn-ghost" id="copyCode" type="button">Скопировать код</button>
+        </div>
+        <p class="muted small">Ждём подтверждения… Пароль от Яндекса приложение не видит.</p>
+      </div>
+      <p class="error" id="loginError" hidden></p>
+      <button class="btn btn-ghost modal-close" id="loginCancel" type="button">Отмена</button>
+    </div>
+  </div>
+
+  <template id="jobTpl">
+    <article class="job">
+      <div class="job-head">
+        <div class="job-title">
+          <span class="job-name"></span>
+          <span class="badge"></span>
+        </div>
+        <button class="btn btn-small btn-ghost job-cancel" type="button">Отменить</button>
+      </div>
+      <ol class="steps"></ol>
+      <p class="error job-error" hidden></p>
+      <div class="outputs" hidden></div>
+    </article>
+  </template>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

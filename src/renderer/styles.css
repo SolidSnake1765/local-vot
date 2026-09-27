@@ -1,0 +1,128 @@
+:root {
+  --bg: #0f1320;
+  --surface: #171c2e;
+  --surface-2: #1f2640;
+  --border: #2a3252;
+  --text: #e8ebf5;
+  --muted: #8f97b5;
+  --accent: #7ee0ff;
+  --accent-2: #6a2fb3;
+  --ok: #5fd39a;
+  --err: #ff7a8a;
+  --warn: #ffc466;
+  --radius: 12px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.error { color: var(--err); margin: 8px 0 0; }
+
+/* ---------- верхняя панель ---------- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo { width: 36px; height: 36px; }
+.brand-name { font-weight: 700; font-size: 16px; }
+.brand-sub { color: var(--muted); font-size: 12px; }
+.account { display: flex; align-items: center; gap: 10px; }
+.account-text { color: var(--muted); }
+.account-text b { color: var(--text); font-weight: 600; }
+
+/* ---------- кнопки и поля ---------- */
+.btn {
+  border: 1px solid transparent; border-radius: 8px; padding: 8px 14px; cursor: pointer;
+  background: linear-gradient(135deg, #3b4bb0, var(--accent-2)); color: #fff; font: inherit; font-weight: 600;
+}
+.btn:hover { filter: brightness(1.1); }
+.btn-ghost { background: transparent; border-color: var(--border); color: var(--text); font-weight: 500; }
+.btn-ghost:hover { background: var(--surface-2); filter: none; }
+.btn-small { padding: 5px 10px; font-size: 13px; }
+input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+select {
+  width: 100%; margin-top: 6px; padding: 7px 8px; border-radius: 8px;
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border); font: inherit;
+}
+
+/* ---------- раскладка ---------- */
+.layout { flex: 1; display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+.work { padding: 20px; overflow-y: auto; }
+.panel { padding: 4px 20px 20px; border-left: 1px solid var(--border); background: var(--surface); overflow-y: auto; }
+
+.dropzone {
+  width: 100%; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 32px 16px; border: 2px dashed var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); cursor: pointer; font: inherit;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--surface-2); }
+.dz-icon { font-size: 28px; color: var(--accent); line-height: 1; }
+.dz-title { font-size: 16px; font-weight: 600; }
+.dz-sub { color: var(--muted); font-size: 13px; }
+
+.jobs-head { display: flex; align-items: baseline; gap: 10px; }
+.jobs { display: flex; flex-direction: column; gap: 12px; }
+.empty { color: var(--muted); }
+
+/* ---------- карточка задания ---------- */
+.job { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.job-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.job-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.job-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.badge.running { color: var(--accent); }
+.badge.done { color: var(--ok); }
+.badge.error { color: var(--err); }
+
+.steps { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.step { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; color: var(--muted); }
+.step .mark { width: 16px; height: 16px; margin-top: 2px; border-radius: 50%; border: 2px solid var(--border); }
+.step.active { color: var(--text); }
+.step.active .mark { border-color: var(--accent); border-top-color: transparent; animation: spin .8s linear infinite; }
+.step.done .mark { border-color: var(--ok); background: var(--ok); }
+.step.error { color: var(--err); }
+.step.error .mark { border-color: var(--err); background: var(--err); }
+.step-detail { font-size: 12px; color: var(--muted); }
+.bar { height: 4px; margin-top: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #9f7bff); transition: width .3s; }
+
+.outputs { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.output { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); }
+.output span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- настройки ---------- */
+.check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+.check.sub { margin-left: 24px; }
+.range, .select { display: block; margin: 8px 0 12px; }
+.range span { display: flex; justify-content: space-between; }
+.folder { display: flex; flex-direction: column; gap: 8px; }
+.folder-path { font-size: 13px; word-break: break-all; }
+.folder-btns { display: flex; gap: 8px; }
+.note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+/* ---------- окно входа ---------- */
+.modal { position: fixed; inset: 0; background: rgba(5, 8, 16, .7); display: grid; place-items: center; }
+.modal[hidden] { display: none; }
+.modal-card { width: min(420px, 90vw); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px 24px; text-align: center; }
+.modal-card h2 { font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--text); margin-top: 0; }
+.code { font: 700 30px/1.2 "Cascadia Mono", Consolas, monospace; letter-spacing: .12em; margin: 14px 0; color: var(--accent); user-select: all; }
+.modal-btns { display: flex; justify-content: center; gap: 10px; }
+.modal-close { margin-top: 16px; }
+
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+.spinner.big { width: 32px; height: 32px; margin: 12px auto; }
+@keyframes spin { to { transform: rotate(360deg); } }

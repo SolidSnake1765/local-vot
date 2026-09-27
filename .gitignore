@@ -5,3 +5,6 @@ out/
 *.mp3
 *.wav
 .env
+.yandex-token.json
+tools/
+samples/
