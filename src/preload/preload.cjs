@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("api", {
   setJobVoice: (id, lively) => ipcRenderer.invoke("jobs:setVoice", id, lively),
   setJobLang: (id, lang) => ipcRenderer.invoke("jobs:setLang", id, lang),
   retranslate: (id) => ipcRenderer.invoke("jobs:retranslate", id),
+  remux: (id) => ipcRenderer.invoke("jobs:remux", id),
   removeJob: (id) => ipcRenderer.invoke("jobs:remove", id),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
 

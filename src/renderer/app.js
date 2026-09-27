@@ -156,6 +156,7 @@ function createCard(job) {
   };
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
   node.querySelector(".job-retranslate").onclick = () => api.retranslate(job.id);
+  node.querySelector(".job-remux").onclick = () => api.remux(job.id);
   node.querySelector(".job-remove").onclick = async () => {
     if (await api.removeJob(job.id)) {
       node.remove();
@@ -195,6 +196,7 @@ function refreshActions(card) {
   const finished = ["done", "error", "cancelled"].includes(card.state);
   card.node.querySelector(".job-actions").hidden = !finished;
   if (!finished) return;
+  card.node.querySelector(".job-remux-row").hidden = !card.hasTranslation;
   const btn = card.node.querySelector(".job-retranslate");
   const hint = card.node.querySelector(".job-hint");
   const done = card.state === "done" && card.voiceUsed !== null;
@@ -268,6 +270,7 @@ function applyUpdate(card, u) {
   if (u.reset) resetSteps(card);
   if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
   if (u.langUsed !== undefined) card.langUsed = u.langUsed;
+  if (u.hasTranslation !== undefined) card.hasTranslation = u.hasTranslation;
   if (u.state && !u.step) setState(card, u.state);
   if (u.step) updateStep(card, u);
   if (u.outputs) showOutputs(card, u.outputs);
@@ -292,13 +295,20 @@ function renderFolder(dir) {
 
 async function initSettings() {
   fillLangSelect($("settingsLang"));
+  for (let v = 0; v <= 100; v += 10) {
+    const opt = document.createElement("option");
+    opt.value = String(v);
+    opt.textContent = v === 0 ? "0% — выключить" : v === 100 ? "100% — как в оригинале" : `${v}%`;
+    $("originalVolume").append(opt);
+  }
   const s = await api.getSettings();
   for (const el of document.querySelectorAll("[data-setting]")) {
     const key = el.dataset.setting;
     if (el.type === "checkbox") el.checked = Boolean(s[key]);
-    else el.value = s[key];
+    else el.value = String(s[key]);
     el.addEventListener("change", () => {
-      const value = el.type === "checkbox" ? el.checked : el.type === "range" ? Number(el.value) : el.value;
+      const numeric = el.type === "range" || el.dataset.type === "number";
+      const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
       syncDependent();
     });
@@ -311,6 +321,12 @@ async function initSettings() {
 function syncDependent() {
   const gain = document.querySelector('[data-setting="voiceGain"]').value;
   $("voiceGainVal").textContent = `${Math.round(gain * 100)}%`;
+  const constant = $("mixMode").value === "constant";
+  $("originalVolumeLabel").textContent = constant ? "Громкость оригинала — всё время" : "Громкость оригинала — пока звучит перевод";
+  $("mixNote").textContent = (constant
+    ? "Оригинал и перевод звучат на заданных уровнях всё время."
+    : "В паузах перевода оригинал звучит в полную громкость.")
+    + " Чтобы применить к готовому видео, нажмите в карточке «Пересобрать видео».";
   const saveVideo = document.querySelector('[data-setting="saveVideo"]').checked;
   document.querySelector('[data-setting="embedSubs"]').disabled = !saveVideo;
 

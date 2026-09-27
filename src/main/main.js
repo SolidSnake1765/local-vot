@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
 import { loadSettings, saveSettings } from "./config.js";
 import * as disk from "./yadisk.js";
-import { runJob, STEPS } from "./pipeline.js";
+import { rmSync } from "node:fs";
+import { runJob, STEPS, translationCacheDir } from "./pipeline.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -28,8 +29,9 @@ function publicJob(j) {
     voiceUsed: j.voiceUsed, langUsed: j.langUsed };
 }
 
-function enqueue(job) {
+function enqueue(job, mode = "translate") {
   job.controller = new AbortController();
+  job.mode = mode;
   job.state = "queued";
   queue.push(job);
   send("job:update", { id: job.id, state: "queued", reset: true });
@@ -46,17 +48,19 @@ async function pump() {
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
-    currentRun = runJob(job, { options: loadSettings(), token },
+    currentRun = runJob(job, { options: loadSettings(), token, mode: job.mode },
       (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
     const { outputs, lively, lang } = await currentRun;
     job.state = "done";
     job.voiceUsed = lively;
     job.langUsed = lang;
-    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively, langUsed: lang });
+    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively, langUsed: lang, hasTranslation: true });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
-    send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "" });
+    send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
+      hasTranslation: Boolean(job.translation) });
   } finally {
+    job.mode = "translate";
     running = false;
     currentRun = null;
     pump();
@@ -80,7 +84,12 @@ function addJobs(files) {
   return added;
 }
 
-// ---------- копии на Диске ----------
+// ---------- копии на Диске и сохранённые переводы ----------
+function removeTranslationCache(job) {
+  job.translation = null;
+  rmSync(translationCacheDir(job.id), { recursive: true, force: true });
+}
+
 async function removeDiskCopy(job) {
   if (!job.diskPath) return;
   const diskPath = job.diskPath;
@@ -103,6 +112,7 @@ async function shutdown() {
     Promise.all([...jobs.values()].map(removeDiskCopy)),
     new Promise((r) => setTimeout(r, 20_000)),
   ]);
+  rmSync(path.join(app.getPath("temp"), "local-vot"), { recursive: true, force: true });
 }
 
 /** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи). */
@@ -198,10 +208,17 @@ ipcMain.handle("jobs:retranslate", (_e, id) => {
   if (!job || !["done", "error", "cancelled"].includes(job.state)) return;
   enqueue(job);
 });
+// собрать видео заново из уже полученного перевода — с текущими настройками звука и сохранения
+ipcMain.handle("jobs:remux", (_e, id) => {
+  const job = jobs.get(id);
+  if (!job?.translation || !["done", "error", "cancelled"].includes(job.state)) return;
+  enqueue(job, "remux");
+});
 ipcMain.handle("jobs:remove", async (_e, id) => {
   const job = jobs.get(id);
   if (!job || ["queued", "running"].includes(job.state)) return false;
   jobs.delete(id);
+  removeTranslationCache(job);
   removeDiskCopy(job);
   return true;
 });
@@ -257,6 +274,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // временные файлы и сохранённые переводы прошлого запуска (если он завершился аварийно)
+  rmSync(path.join(app.getPath("temp"), "local-vot"), { recursive: true, force: true });
   createWindow();
   purgeLeftovers();
 });

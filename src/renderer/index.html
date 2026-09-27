@@ -64,22 +64,28 @@
       <p class="note">У каждого видео в очереди — свои голос и язык, их можно поменять в карточке.</p>
 
       <h2>Звук</h2>
+      <label class="select">
+        <span>Режим</span>
+        <select data-setting="mixMode" id="mixMode">
+          <option value="duck">Приглушать оригинал, пока звучит перевод</option>
+          <option value="constant">Постоянная громкость</option>
+        </select>
+      </label>
+      <label class="select">
+        <span id="originalVolumeLabel">Громкость оригинала</span>
+        <select data-setting="originalVolume" data-type="number" id="originalVolume"></select>
+      </label>
       <label class="range">
         <span>Громкость перевода <b id="voiceGainVal"></b></span>
         <input type="range" min="0.5" max="2" step="0.1" data-setting="voiceGain">
       </label>
-      <label class="select">
-        <span>Приглушать оригинал под переводом</span>
-        <select data-setting="duck">
-          <option value="light">Слабо</option>
-          <option value="medium">Средне</option>
-          <option value="strong">Сильно</option>
-        </select>
-      </label>
+      <label class="check"><input type="checkbox" data-setting="autoLevel"> Подстраивать перевод под громкость оригинала</label>
+      <p class="note tight">Тихое видео — тише перевод, громкое — громче. Ползунок «Громкость перевода» действует поверх.</p>
+      <p class="note" id="mixNote"></p>
 
       <h2>Яндекс Диск</h2>
       <label class="check"><input type="checkbox" data-setting="deletePermanently"> Удалять копию с Диска сразу, мимо Корзины</label>
-      <p class="note">Через Диск видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром), после перевода файл удаляется. Диск ограничивает скорость загрузки — около 2–3 минут на 20 минут видео.</p>
+      <p class="note">Через Диск видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром). Копия хранится закрытой, пока видео в списке, и удаляется при «Убрать из списка» или выходе. Диск ограничивает скорость загрузки — около 2–3 минут на 20 минут видео.</p>
     </aside>
   </main>
 
@@ -129,6 +135,10 @@
         <div class="action-row">
           <button class="btn btn-small job-retranslate" type="button"></button>
           <span class="muted small job-hint"></span>
+        </div>
+        <div class="action-row job-remux-row" hidden>
+          <button class="btn btn-small btn-ghost job-remux" type="button">Пересобрать видео</button>
+          <span class="muted small">Без запроса к Яндексу: тот же перевод, но с текущими настройками звука и сохранения</span>
         </div>
         <div class="action-row">
           <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>

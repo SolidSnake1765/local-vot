@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, rmSync, statfsSync, statSync } fro
 import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
-import { makeLight, mux, probe } from "./media.js";
+import { makeLight, measureLoudness, mux, probe } from "./media.js";
 import { detectedName, langName, LIVELY_LANG } from "./languages.js";
 
 export const STEPS = [
@@ -33,11 +33,14 @@ const DISK_BYTES_PER_SEC = 130_000; // замерено: API Диска прин
  * Копия на Диске живёт дольше одного перевода: job.diskPath сохраняется, чтобы «Перевести заново»
  * и смена голоса не грузили файл повторно. Убирает её main.js (при удалении из списка и выходе).
  *
- * @param job   { id, file, lively, diskPath?, duration? } — diskPath/duration заполняются здесь
+ * Полученный перевод (дорожка и субтитры) тоже хранится — в job.translation, в папке кэша, —
+ * чтобы «Пересобрать видео» (mode = "remux") собирало видео заново без запроса к Яндексу.
+ *
+ * @param job   { id, file, lively, lang, diskPath?, duration?, translation? } — дополняется здесь
  * @param emit  ({ step, state?: "active"|"done"|"error", progress?: 0..1, detail?: string }) — ход работы
- * @returns { outputs: string[], lively: boolean } — созданные файлы и каким голосом вышел перевод
+ * @returns { outputs: string[], lively: boolean, lang: string } — созданные файлы, голос и язык перевода
  */
-export async function runJob(job, { options, token }, emit, signal) {
+export async function runJob(job, { options, token, mode = "translate" }, emit, signal) {
   const { file } = job;
   const work = path.join(app.getPath("temp"), "local-vot", `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
@@ -50,14 +53,28 @@ export async function runJob(job, { options, token }, emit, signal) {
   };
 
   try {
-    if (job.diskPath) {
+    let result, lively, lang;
+    if (mode === "remux") {
+      if (!job.translation || !existsSync(job.translation.audio)) {
+        throw new Error("Готового перевода нет — нажмите «Перевести заново».");
+      }
+      ({ lively, lang } = job.translation);
+      result = job.translation;
       emit({ step: "light", state: "done", detail: "" });
-      emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
+      emit({ step: "upload", state: "done", detail: "Не нужна" });
+      emit({ step: "translate", state: "done", detail: "Берём уже полученный перевод — без запроса к Яндексу" });
+      emit({ step: "cleanup", state: "done", detail: "" });
     } else {
-      await uploadCopy(job, work, token, step, signal);
+      if (job.diskPath) {
+        emit({ step: "light", state: "done", detail: "" });
+        emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
+      } else {
+        await uploadCopy(job, work, token, step, signal);
+      }
+      ({ result, lively, lang } = await translateOnce(job, work, token, step, emit, signal));
+      job.translation = keepTranslation(job, result, lively, lang);
+      result = job.translation;
     }
-
-    const { result, lively, lang } = await translateOnce(job, work, token, step, emit, signal);
 
     step("save", { state: "active", detail: "Проверяем место на диске" });
     mkdirSync(outDir, { recursive: true });
@@ -69,10 +86,13 @@ export async function runJob(job, { options, token }, emit, signal) {
     const outputs = [];
     const tag = lively ? "RU живые" : "RU";
     let pending = null; // файл, который пишется прямо сейчас, — при сбое или отмене удаляем
+    let saveNote = "";
     try {
       if (options.saveVideo) {
         pending = freePath(path.join(outDir, `${name} [${tag}].mkv`));
-        await muxWithProgress(file, result, pending, options, job.duration, srcSize, step, signal);
+        const { autoGainDb } = await muxWithProgress(file, result, pending,
+          { ...options, origLoudness: job.origLoudness ?? null }, job.duration, srcSize, step, signal);
+        saveNote = mixNote(options, autoGainDb);
         outputs.push(pending);
       }
       if (options.saveAudio) {
@@ -90,7 +110,7 @@ export async function runJob(job, { options, token }, emit, signal) {
       if (pending) rmSync(pending, { force: true });
       throw diskFullError(e) ?? e;
     }
-    step("save", { state: "done", detail: "" });
+    step("save", { state: "done", detail: saveNote });
     return { outputs, lively, lang };
   } catch (e) {
     if (current) emit({ step: current, state: "error", detail: e.message });
@@ -98,6 +118,26 @@ export async function runJob(job, { options, token }, emit, signal) {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+/** Папка, где хранится последний полученный перевод видео (для пересборки без Яндекса). */
+export function translationCacheDir(jobId) {
+  return path.join(app.getPath("temp"), "local-vot", "cache", jobId);
+}
+
+/** Переносит дорожку и субтитры из временной папки в кэш задания, прежний перевод заменяется. */
+function keepTranslation(job, result, lively, lang) {
+  const dir = translationCacheDir(job.id);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const audio = path.join(dir, "voice.ru.mp3");
+  copyFileSync(result.audio, audio);
+  let subs = null;
+  if (result.subs) {
+    subs = path.join(dir, "subs.ru.srt");
+    copyFileSync(result.subs, subs);
+  }
+  return { audio, subs, subsCount: result.subsCount, lively, lang };
 }
 
 /** Сборка видео с прогрессом: проценты по времени ffmpeg, записанный объём и скорость — по размеру файла. */
@@ -125,10 +165,24 @@ async function muxWithProgress(file, result, out, options, duration, srcSize, st
   };
   const timer = setInterval(tick, 1000);
   try {
-    await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, duration, (x) => { p = x; }, signal);
+    step("save", { detail: "Готовим звук" });
+    return await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, duration, (x) => { p = x; }, signal);
   } finally {
     clearInterval(timer);
   }
+}
+
+/** Как сведён звук — одной строкой для карточки. */
+function mixNote(options, autoGainDb) {
+  const orig = Number(options.originalVolume);
+  const parts = [options.mixMode === "constant"
+    ? `Оригинал ${orig}% постоянно`
+    : orig >= 100 ? "Оригинал не приглушён" : `Оригинал ${orig}% под переводом`];
+  parts.push(`перевод ${Math.round(options.voiceGain * 100)}%`);
+  if (autoGainDb !== null && autoGainDb !== undefined) {
+    parts.push(`подстроен под оригинал: ${autoGainDb > 0 ? "+" : ""}${autoGainDb.toFixed(1)} дБ`);
+  }
+  return parts.join(" · ");
 }
 
 const MB = 1024 * 1024;
@@ -172,7 +226,11 @@ async function uploadCopy(job, work, token, step, signal) {
   } catch (e) {
     throw diskFullError(e) ?? e;
   }
-  step("light", { state: "done", detail: "" });
+  // громкость оригинала меряем по облегчённой копии: в ней тот же звук, а читать её — секунды,
+  // в отличие от многогигабайтного исходника; нужна для автоподстройки громкости перевода
+  step("light", { detail: "Измеряем громкость" });
+  job.origLoudness = await measureLoudness(light, signal);
+  step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
   step("upload", { state: "active", detail: "Проверяем место на Яндекс Диске" });
   const lightSize = statSync(light).size;
