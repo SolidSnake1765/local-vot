@@ -7,7 +7,8 @@ import * as auth from "./auth.js";
 import { loadSettings, saveSettings } from "./config.js";
 import * as disk from "./yadisk.js";
 import { rmSync } from "node:fs";
-import { runJob, STEPS, translationCacheDir } from "./pipeline.js";
+import { describeMix, runJob, STEPS, translationCacheDir } from "./pipeline.js";
+import { renderPreview } from "./media.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -48,17 +49,18 @@ async function pump() {
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
-    currentRun = runJob(job, { options: loadSettings(), token, mode: job.mode },
+    currentRun = runJob(job, { getOptions: loadSettings, token, mode: job.mode },
       (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
     const { outputs, lively, lang } = await currentRun;
     job.state = "done";
     job.voiceUsed = lively;
     job.langUsed = lang;
-    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively, langUsed: lang, hasTranslation: true });
+    send("job:update", { id: job.id, state: "done", outputs, voiceUsed: lively, langUsed: lang, hasTranslation: true,
+      preview: previewInfo(job) });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
-      hasTranslation: Boolean(job.translation) });
+      hasTranslation: Boolean(job.translation), preview: previewInfo(job) });
   } finally {
     job.mode = "translate";
     running = false;
@@ -83,6 +85,39 @@ function addJobs(files) {
   queueMicrotask(pump);
   return added;
 }
+
+// ---------- предпрослушивание ----------
+const PREVIEW_SECONDS = 20;
+const previewControllers = new Map(); // id → AbortController текущей сборки куска
+
+/** Что нужно интерфейсу для ползунка: длительность и где начинается первая фраза перевода. */
+function previewInfo(job) {
+  if (!job.translation?.analysis) return null;
+  const first = job.translation.analysis.segments[0]?.[0] ?? 0;
+  return { duration: job.duration, start: Math.max(0, first - 1), length: PREVIEW_SECONDS };
+}
+
+// кусок звука с текущими настройками; повторный запрос для того же видео отменяет предыдущий
+ipcMain.handle("jobs:preview", async (_e, id, start) => {
+  const job = jobs.get(id);
+  if (!job?.translation?.analysis) return { ok: false, error: "Готового перевода нет" };
+  previewControllers.get(id)?.abort();
+  const controller = new AbortController();
+  previewControllers.set(id, controller);
+  const from = Math.max(0, Math.min(Number(start) || 0, Math.max(0, job.duration - PREVIEW_SECONDS)));
+  try {
+    const settings = loadSettings();
+    const { data, autoGainDb } = await renderPreview(job.file, job.translation.audio, from, PREVIEW_SECONDS,
+      { ...settings, origLoudness: job.origLoudness ?? null, voiceAnalysis: job.translation.analysis },
+      controller.signal);
+    // какие настройки применились — чтобы на слух не гадать, дошла ли смена настроек
+    return { ok: true, data, start: from, note: describeMix(settings, autoGainDb) };
+  } catch (e) {
+    return { ok: false, error: controller.signal.aborted ? "" : e.message };
+  } finally {
+    if (previewControllers.get(id) === controller) previewControllers.delete(id);
+  }
+});
 
 // ---------- копии на Диске и сохранённые переводы ----------
 function removeTranslationCache(job) {

@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, rmSync, statfsSync, statSync } fro
 import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
-import { makeLight, measureLoudness, mux, probe } from "./media.js";
+import { analyzeVoice, makeLight, measureLoudness, mixAudio, mux, probe } from "./media.js";
 import { detectedName, langName, LIVELY_LANG } from "./languages.js";
 
 export const STEPS = [
@@ -40,12 +40,11 @@ const DISK_BYTES_PER_SEC = 130_000; // замерено: API Диска прин
  * @param emit  ({ step, state?: "active"|"done"|"error", progress?: 0..1, detail?: string }) — ход работы
  * @returns { outputs: string[], lively: boolean, lang: string } — созданные файлы, голос и язык перевода
  */
-export async function runJob(job, { options, token, mode = "translate" }, emit, signal) {
+export async function runJob(job, { getOptions, token, mode = "translate" }, emit, signal) {
   const { file } = job;
   const work = path.join(app.getPath("temp"), "local-vot", `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
-  const outDir = options.outputDir || path.dirname(file);
   let current = null;
   const step = (stepId, patch = {}) => {
     current = stepId;
@@ -72,11 +71,15 @@ export async function runJob(job, { options, token, mode = "translate" }, emit, 
         await uploadCopy(job, work, token, step, signal);
       }
       ({ result, lively, lang } = await translateOnce(job, work, token, step, emit, signal));
-      job.translation = keepTranslation(job, result, lively, lang);
+      job.translation = await keepTranslation(job, result, lively, lang, signal);
       result = job.translation;
     }
 
     step("save", { state: "active", detail: "Проверяем место на диске" });
+    // настройки сохранения и звука — на момент сохранения, а не старта: пока видео грузилось
+    // и переводилось, их могли поменять
+    const options = getOptions();
+    const outDir = options.outputDir || path.dirname(file);
     mkdirSync(outDir, { recursive: true });
     const srcSize = statSync(file).size;
     // видео копируется без перекодирования — итог весит примерно как исходник
@@ -87,16 +90,27 @@ export async function runJob(job, { options, token, mode = "translate" }, emit, 
     const tag = lively ? "RU живые" : "RU";
     let pending = null; // файл, который пишется прямо сейчас, — при сбое или отмене удаляем
     let saveNote = "";
+    const mixOpts = { ...options, origLoudness: job.origLoudness ?? null, voiceAnalysis: result.analysis };
     try {
       if (options.saveVideo) {
         pending = freePath(path.join(outDir, `${name} [${tag}].mkv`));
-        const { autoGainDb } = await muxWithProgress(file, result, pending,
-          { ...options, origLoudness: job.origLoudness ?? null }, job.duration, srcSize, step, signal);
-        saveNote = mixNote(options, autoGainDb);
+        const out = pending;
+        const { autoGainDb } = await withSaveProgress(out, "Собираем видео", srcSize, step, (onP) =>
+          mux(file, result.audio, options.embedSubs ? result.subs : null, out, mixOpts, job.duration, onP, signal));
+        saveNote = describeMix(options, autoGainDb);
         outputs.push(pending);
       }
       if (options.saveAudio) {
-        pending = freePath(path.join(outDir, `${name} [${tag}].mp3`));
+        // готовая звуковая дорожка: оригинал + перевод, как в видео, — для внешней дорожки в плеере
+        pending = freePath(path.join(outDir, `${name} [${tag}].m4a`));
+        const out = pending;
+        const { autoGainDb } = await withSaveProgress(out, "Собираем звуковую дорожку", job.duration * 24_000, step, (onP) =>
+          mixAudio(file, result.audio, out, mixOpts, job.duration, onP, signal));
+        saveNote = describeMix(options, autoGainDb);
+        outputs.push(pending);
+      }
+      if (options.saveVoice) {
+        pending = freePath(path.join(outDir, `${name} [${tag}, голос].mp3`));
         copyFileSync(result.audio, pending);
         outputs.push(pending);
       }
@@ -125,8 +139,11 @@ export function translationCacheDir(jobId) {
   return path.join(app.getPath("temp"), "local-vot", "cache", jobId);
 }
 
-/** Переносит дорожку и субтитры из временной папки в кэш задания, прежний перевод заменяется. */
-function keepTranslation(job, result, lively, lang) {
+/**
+ * Переносит дорожку и субтитры из временной папки в кэш задания (прежний перевод заменяется)
+ * и один раз разбирает дорожку — громкость и места речи — для сборки и предпрослушивания.
+ */
+async function keepTranslation(job, result, lively, lang, signal) {
   const dir = translationCacheDir(job.id);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
@@ -137,11 +154,15 @@ function keepTranslation(job, result, lively, lang) {
     subs = path.join(dir, "subs.ru.srt");
     copyFileSync(result.subs, subs);
   }
-  return { audio, subs, subsCount: result.subsCount, lively, lang };
+  const analysis = await analyzeVoice(audio, signal);
+  return { audio, subs, subsCount: result.subsCount, lively, lang, analysis };
 }
 
-/** Сборка видео с прогрессом: проценты по времени ffmpeg, записанный объём и скорость — по размеру файла. */
-async function muxWithProgress(file, result, out, options, duration, srcSize, step, signal) {
+/**
+ * Запись файла с прогрессом: проценты — по времени ffmpeg (run получает onProgress),
+ * записанный объём и скорость — по размеру файла. expectedBytes — ориентир итогового размера.
+ */
+async function withSaveProgress(out, label, expectedBytes, step, run) {
   const t0 = Date.now();
   let p = 0;
   let lastBytes = 0;
@@ -159,21 +180,21 @@ async function muxWithProgress(file, result, out, options, duration, srcSize, st
     const eta = p > 0.02 ? Math.ceil((elapsed * (1 - p)) / p) : null;
     step("save", {
       progress: p,
-      detail: [`Собираем видео · ${Math.round(p * 100)}%`, `${size(bytes)} из ~${size(srcSize)}`,
-        `${(speed / MB).toFixed(0)} МБ/с`, eta !== null ? `осталось ~${fmtSec(eta)}` : ""].filter(Boolean).join(" · "),
+      detail: [`${label} · ${Math.round(p * 100)}%`, `${size(bytes)} из ~${size(expectedBytes)}`,
+        `${(speed / MB).toFixed(speed < 10 * MB ? 1 : 0)} МБ/с`, eta !== null ? `осталось ~${fmtSec(eta)}` : ""].filter(Boolean).join(" · "),
     });
   };
   const timer = setInterval(tick, 1000);
   try {
-    step("save", { detail: "Готовим звук" });
-    return await mux(file, result.audio, options.embedSubs ? result.subs : null, out, options, duration, (x) => { p = x; }, signal);
+    step("save", { progress: 0, detail: `${label} · готовим звук` });
+    return await run((x) => { p = x; });
   } finally {
     clearInterval(timer);
   }
 }
 
-/** Как сведён звук — одной строкой для карточки. */
-function mixNote(options, autoGainDb) {
+/** Как сведён звук — одной строкой для карточки (и для предпрослушивания). */
+export function describeMix(options, autoGainDb) {
   const orig = Number(options.originalVolume);
   const parts = [options.mixMode === "constant"
     ? `Оригинал ${orig}% постоянно`

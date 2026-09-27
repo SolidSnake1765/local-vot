@@ -1,6 +1,6 @@
 // Работа с видео через ffmpeg (встроенный ffmpeg-static; если его нет — системный).
 import { spawn } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import ffmpegStatic from "ffmpeg-static";
@@ -156,56 +156,130 @@ const AUTO_GAIN_MAX_DB = 12;
 const AUTO_TARGET_OFFSET_DB = 3;
 
 /**
- * Итоговое видео: картинка без перекодирования + дорожка «оригинал с переводом поверх»
- * + исходная дорожка + субтитры.
+ * Разбор дорожки перевода: громкость речи и где она звучит. Делается один раз после перевода —
+ * сборка и предпрослушивание берут готовое (на 40-мин видео это экономит секунды на каждом прослушивании).
+ */
+export async function analyzeVoice(voice, signal) {
+  const [loudness, segments] = await Promise.all([measureLoudness(voice, signal), speechSegments(voice, signal)]);
+  return { loudness, segments };
+}
+
+/**
+ * Граф фильтров сведения: [0] — звук оригинала, [1] — перевод → [mix].
  *
  * mixMode "duck"     — оригинал на originalVolume %, только пока звучит перевод; в паузах 100 %;
  *         "constant" — оригинал всё время на originalVolume %.
  * autoLevel + origLoudness (LUFS оригинала) — перевод подгоняется по громкости к оригиналу,
  * voiceGain применяется поверх.
- * @returns { autoGainDb } — на сколько подстроен перевод (null — без подстройки)
+ * offset — с какой секунды вырезан кусок (для предпрослушивания): фразы сдвигаются к началу куска.
  */
-export async function mux(video, voice, subs, out, opts = {}, duration, onProgress, signal) {
+function mixFilter(opts, analysis, offset = 0) {
   const { voiceGain = 1, originalVolume = 30, mixMode = "duck", autoLevel = true, origLoudness = null } = opts;
   const level = Math.min(100, Math.max(0, Number(originalVolume) || 0)) / 100;
 
   let autoGainDb = null;
-  if (autoLevel && origLoudness !== null) {
-    const voiceLoudness = await measureLoudness(voice, signal);
-    if (voiceLoudness !== null) {
-      autoGainDb = Math.min(AUTO_GAIN_MAX_DB, Math.max(AUTO_GAIN_MIN_DB, origLoudness + AUTO_TARGET_OFFSET_DB - voiceLoudness));
-    }
+  if (autoLevel && origLoudness !== null && analysis.loudness !== null) {
+    autoGainDb = Math.min(AUTO_GAIN_MAX_DB, Math.max(AUTO_GAIN_MIN_DB, origLoudness + AUTO_TARGET_OFFSET_DB - analysis.loudness));
   }
   const voiceVolume = voiceGain * 10 ** ((autoGainDb ?? 0) / 20);
 
+  // оба звука — в стерео до смешивания: перевод Яндекса моно, и без этого amix сводит к моно
+  // всю итоговую дорожку, теряя стерео оригинала
+  const orig = "[0:a:0]aresample=48000,aformat=channel_layouts=stereo";
   let origChain;
-  if (level >= 1) origChain = "[0:a:0]aresample=48000[duck]";
-  else if (mixMode === "constant") origChain = `[0:a:0]aresample=48000,volume=${level.toFixed(3)}[duck]`;
-  else origChain = `[0:a:0]aresample=48000,volume='${duckExpression(await speechSegments(voice, signal), level)}':eval=frame[duck]`;
+  if (level >= 1) {
+    origChain = `${orig}[duck]`;
+  } else if (mixMode === "constant") {
+    origChain = `${orig},volume=${level.toFixed(3)}[duck]`;
+  } else {
+    const segments = analysis.segments
+      .map(([a, b]) => [a - offset, b - offset])
+      .filter(([, b]) => b > -RAMP);
+    origChain = `${orig},volume='${duckExpression(segments, level)}':eval=frame[duck]`;
+  }
 
   const filter = [
-    `[1:a]aresample=48000,volume=${voiceVolume.toFixed(4)}[voice]`,
+    `[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=${voiceVolume.toFixed(4)}[voice]`,
     origChain,
     "[duck][voice]amix=inputs=2:duration=first:normalize=0[mix]",
   ].join(";\n");
-  const script = path.join(tmpdir(), `local-vot-filter-${process.pid}-${Date.now()}.txt`);
+  return { filter, autoGainDb };
+}
+
+/** ffmpeg с графом фильтров из файла (длинный граф не влезает в командную строку Windows). */
+async function withFilterScript(filter, run) {
+  const script = path.join(tmpdir(), `local-vot-filter-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(script, filter);
-  const withSubs = Boolean(subs);
   try {
-    await ffmpeg([
-      "-v", "error", "-stats",
-      "-i", video, "-i", voice, ...(withSubs ? ["-i", subs] : []),
-      FILTER_SCRIPT_FLAG, script,
-      "-map", "0:v:0", "-map", "[mix]", "-map", "0:a:0", ...(withSubs ? ["-map", "2:s"] : []),
-      "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "copy", ...(withSubs ? ["-c:s", "srt"] : []),
-      "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Перевод",
-      "-metadata:s:a:1", "title=Оригинал",
-      ...(withSubs ? ["-metadata:s:s:0", "language=rus", "-metadata:s:s:0", "title=Русские"] : []),
-      "-disposition:a:0", "default", "-disposition:a:1", "0",
-      out,
-    ], { duration, onProgress, signal });
+    return await run(script);
   } finally {
     rmSync(script, { force: true });
   }
+}
+
+/**
+ * Итоговое видео: картинка без перекодирования + дорожка «оригинал с переводом поверх»
+ * + исходная дорожка + субтитры. opts — см. mixFilter, плюс voiceAnalysis (из analyzeVoice).
+ * @returns { autoGainDb } — на сколько подстроен перевод (null — без подстройки)
+ */
+export async function mux(video, voice, subs, out, opts = {}, duration, onProgress, signal) {
+  const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
+  const { filter, autoGainDb } = mixFilter(opts, analysis);
+  const withSubs = Boolean(subs);
+  await withFilterScript(filter, (script) => ffmpeg([
+    "-v", "error", "-stats",
+    "-i", video, "-i", voice, ...(withSubs ? ["-i", subs] : []),
+    FILTER_SCRIPT_FLAG, script,
+    "-map", "0:v:0", "-map", "[mix]", "-map", "0:a:0", ...(withSubs ? ["-map", "2:s"] : []),
+    "-c:v", "copy", "-c:a:0", "aac", "-b:a:0", "192k", "-c:a:1", "copy", ...(withSubs ? ["-c:s", "srt"] : []),
+    "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Перевод",
+    "-metadata:s:a:1", "title=Оригинал",
+    ...(withSubs ? ["-metadata:s:s:0", "language=rus", "-metadata:s:s:0", "title=Русские"] : []),
+    "-disposition:a:0", "default", "-disposition:a:1", "0",
+    out,
+  ], { duration, onProgress, signal }));
   return { autoGainDb };
+}
+
+/**
+ * Звуковая дорожка отдельно: оригинал + перевод с теми же настройками, что у видео, без картинки.
+ * Для плееров, которые подключают внешнюю дорожку, — вместо копии многогигабайтного видео.
+ * @returns { autoGainDb }
+ */
+export async function mixAudio(video, voice, out, opts = {}, duration, onProgress, signal) {
+  const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
+  const { filter, autoGainDb } = mixFilter(opts, analysis);
+  await withFilterScript(filter, (script) => ffmpeg([
+    "-v", "error", "-stats",
+    "-i", video, "-i", voice,
+    FILTER_SCRIPT_FLAG, script,
+    "-map", "[mix]", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+    "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Перевод",
+    out,
+  ], { duration, onProgress, signal }));
+  return { autoGainDb };
+}
+
+/**
+ * Предпрослушивание: только звук куска [start, start+length) с теми же настройками, что у сборки.
+ * Исходник не копируется — ffmpeg прыгает к нужному месту (быстро даже на десятках гигабайт).
+ * @returns { data: Buffer (m4a/AAC), autoGainDb }
+ */
+export async function renderPreview(video, voice, start, length, opts = {}, signal) {
+  const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
+  const { filter, autoGainDb } = mixFilter(opts, analysis, start);
+  const out = path.join(tmpdir(), `local-vot-preview-${process.pid}-${Date.now()}.m4a`);
+  const cut = ["-ss", start.toFixed(2), "-t", String(length)];
+  try {
+    await withFilterScript(filter, (script) => ffmpeg([
+      "-v", "error",
+      ...cut, "-i", video, ...cut, "-i", voice,
+      FILTER_SCRIPT_FLAG, script,
+      "-map", "[mix]", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+      out,
+    ], { signal }));
+    return { data: readFileSync(out), autoGainDb };
+  } finally {
+    rmSync(out, { force: true });
+  }
 }

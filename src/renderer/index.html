@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'">
   <title>Local VOT</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -42,7 +42,9 @@
       <h2>Что сохранить</h2>
       <label class="check"><input type="checkbox" data-setting="saveVideo"> Видео с переводом <span class="muted">.mkv</span></label>
       <label class="check sub"><input type="checkbox" data-setting="embedSubs"> Вшить русские субтитры</label>
-      <label class="check"><input type="checkbox" data-setting="saveAudio"> Дорожку перевода отдельно <span class="muted">.mp3</span></label>
+      <label class="check"><input type="checkbox" data-setting="saveAudio"> Звуковую дорожку отдельно <span class="muted">.m4a</span></label>
+      <p class="note tight">Оригинал + перевод, как в видео, — для плееров, которые подключают внешнюю дорожку. Не копирует само видео.</p>
+      <label class="check"><input type="checkbox" data-setting="saveVoice"> Только голос перевода <span class="muted">.mp3</span></label>
       <label class="check"><input type="checkbox" data-setting="saveSubs"> Субтитры отдельно <span class="muted">.srt</span></label>
 
       <h2>Куда</h2>
@@ -131,6 +133,16 @@
       <ol class="steps"></ol>
       <p class="error job-error" hidden></p>
       <div class="outputs" hidden></div>
+      <div class="preview" hidden>
+        <div class="preview-title">Прослушать с текущими настройками звука</div>
+        <div class="preview-controls">
+          <input type="range" class="preview-pos" min="0" step="1" value="0">
+          <span class="preview-time">0:00</span>
+          <button class="btn btn-small preview-play" type="button">▶ 20 секунд</button>
+        </div>
+        <audio class="preview-audio" controls hidden></audio>
+        <p class="muted small preview-status"></p>
+      </div>
       <div class="job-actions" hidden>
         <div class="action-row">
           <button class="btn btn-small job-retranslate" type="button"></button>

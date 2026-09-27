@@ -9,6 +9,14 @@ let LIVELY_LANG = "en";
 let loggedIn = false;
 const langName = (code) => LANGS.find((l) => l.code === code)?.name ?? code;
 
+const fmtTime = (sec) => {
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+};
+
 function fillLangSelect(select) {
   for (const l of LANGS) {
     const opt = document.createElement("option");
@@ -157,8 +165,34 @@ function createCard(job) {
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
   node.querySelector(".job-retranslate").onclick = () => api.retranslate(job.id);
   node.querySelector(".job-remux").onclick = () => api.remux(job.id);
+
+  // предпрослушивание: кусок звука с текущими настройками, собирается за доли секунды
+  const pos = node.querySelector(".preview-pos");
+  const pTime = node.querySelector(".preview-time");
+  const pPlay = node.querySelector(".preview-play");
+  const pAudio = node.querySelector(".preview-audio");
+  const pStatus = node.querySelector(".preview-status");
+  pos.oninput = () => { pTime.textContent = fmtTime(Number(pos.value)); };
+  pPlay.onclick = async () => {
+    pStatus.classList.remove("stale");
+    pStatus.textContent = "Готовим звук…";
+    pPlay.disabled = true;
+    const r = await api.preview(job.id, Number(pos.value));
+    pPlay.disabled = false;
+    if (!r.ok) {
+      pStatus.textContent = r.error;
+      return;
+    }
+    if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
+    card.previewUrl = URL.createObjectURL(new Blob([r.data], { type: "audio/mp4" }));
+    pAudio.src = card.previewUrl;
+    pAudio.hidden = false;
+    pAudio.play();
+    pStatus.textContent = `${fmtTime(r.start)}–${fmtTime(r.start + 20)} · ${r.note}`;
+  };
   node.querySelector(".job-remove").onclick = async () => {
     if (await api.removeJob(job.id)) {
+      if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
       node.remove();
       cards.delete(job.id);
       $("emptyHint").hidden = cards.size > 0;
@@ -185,7 +219,40 @@ function setState(card, state) {
   card.node.querySelector(".job-lively").disabled = state === "running";
   card.node.querySelector(".job-lang").disabled = state === "running";
   if (state === "running") card.node.querySelector(".job-note").hidden = true;
+  // пока видео переводится или пересобирается заново, слушать нечего — прячем
+  if (active) {
+    card.node.querySelector(".preview").hidden = true;
+    card.node.querySelector(".preview-audio").pause();
+  }
   refreshActions(card);
+}
+
+/** Показать блок прослушивания: ползунок по длине видео, по умолчанию — с первой фразы перевода. */
+function setupPreview(card, info) {
+  const box = card.node.querySelector(".preview");
+  if (!info) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const pos = box.querySelector(".preview-pos");
+  const maxStart = Math.max(0, Math.floor(info.duration - info.length));
+  pos.max = String(maxStart);
+  if (!card.previewPlaced) {
+    pos.value = String(Math.min(maxStart, Math.floor(info.start)));
+    card.previewPlaced = true;
+  }
+  box.querySelector(".preview-time").textContent = fmtTime(Number(pos.value));
+}
+
+/** Настройки звука поменялись — прослушанный кусок уже не соответствует им. */
+function markPreviewsStale() {
+  for (const card of cards.values()) {
+    if (!card.previewUrl) continue;
+    const st = card.node.querySelector(".preview-status");
+    st.textContent = "Настройки звука изменились — нажмите «▶ 20 секунд», чтобы послушать заново";
+    st.classList.add("stale");
+  }
 }
 
 /**
@@ -271,6 +338,7 @@ function applyUpdate(card, u) {
   if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
   if (u.langUsed !== undefined) card.langUsed = u.langUsed;
   if (u.hasTranslation !== undefined) card.hasTranslation = u.hasTranslation;
+  if (u.preview !== undefined && !["queued", "running"].includes(u.state)) setupPreview(card, u.preview);
   if (u.state && !u.step) setState(card, u.state);
   if (u.step) updateStep(card, u);
   if (u.outputs) showOutputs(card, u.outputs);
@@ -311,6 +379,7 @@ async function initSettings() {
       const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
       syncDependent();
+      if (["mixMode", "originalVolume", "voiceGain", "autoLevel"].includes(key)) markPreviewsStale();
     });
     if (el.type === "range") el.addEventListener("input", syncDependent);
   }
