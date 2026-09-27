@@ -113,6 +113,7 @@ select {
 .folder-path { font-size: 13px; word-break: break-all; }
 .folder-btns { display: flex; gap: 8px; }
 .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.note.tight { margin: 2px 0 0 24px; }
 
 /* ---------- окно входа ---------- */
 .modal { position: fixed; inset: 0; background: rgba(5, 8, 16, .7); display: grid; place-items: center; }

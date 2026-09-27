@@ -80,8 +80,22 @@ export async function runJob({ id, file, options, token }, emit, signal) {
     try {
       step("translate", { state: "active", detail: "Открываем доступ к файлу" });
       const url = await disk.publish(token, diskPath, signal);
-      result = await translate(url, duration, path.join(work, "yandex"), (msg) => step("translate", { detail: msg }), signal);
-      step("translate", { state: "done", detail: result.subsCount ? `${result.subsCount} строк субтитров` : "" });
+      const onStatus = (msg) => step("translate", { detail: msg });
+      const base = path.join(work, "yandex");
+      let voice = options.livelyVoice ? "живые голоса" : "обычные голоса";
+      try {
+        result = await translate(url, duration, base, onStatus, signal, { lively: options.livelyVoice, token });
+      } catch (e) {
+        if (!options.livelyVoice || signal.aborted) throw e;
+        // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
+        onStatus("Живые голоса не получились, переводим обычными");
+        voice = "обычные голоса";
+        result = await translate(url, duration, base, onStatus, signal);
+      }
+      step("translate", {
+        state: "done",
+        detail: [voice[0].toUpperCase() + voice.slice(1), result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
+      });
     } finally {
       // что бы ни случилось — не оставляем файл висеть по открытой ссылке
       emit({ step: "cleanup", state: "active", detail: "" });

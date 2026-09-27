@@ -20,9 +20,12 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
  *                 шлёт значение по умолчанию, и Яндекс сбоит на повторных запросах
  * @param base     путь без расширения: <base>.ru.mp3, <base>.ru.srt
  * @param onStatus текст для пользователя о ходе перевода
+ * @param lively   «живые голоса» (голоса, похожие на оригинальные; только EN→RU). Нужен токен
+ *                 Яндекса — подходит токен входа нашего приложения (проверено: isLivelyVoice=true)
  */
-export async function translate(url, duration, base, onStatus, signal) {
-  const client = new VOTClient({ requestLang: "en", responseLang: "ru" });
+export async function translate(url, duration, base, onStatus, signal, { lively = false, token } = {}) {
+  const client = new VOTClient({ requestLang: "en", responseLang: "ru", apiToken: lively ? token : undefined });
+  const extraOpts = { useLivelyVoice: Boolean(lively && token) };
   const videoData = { ...(await getVideoData(url)), duration };
 
   let res;
@@ -33,7 +36,7 @@ export async function translate(url, duration, base, onStatus, signal) {
     try {
       // extraOpts.firstRequest не трогать: Яндекс принимает только true (значение по умолчанию),
       // с false повторные запросы падают с «error_id ... see logs»
-      res = await client.translateVideo({ videoData });
+      res = await client.translateVideo({ videoData, extraOpts });
       errors = 0;
     } catch (e) {
       if (e.data?.status === 0 || /couldn't translate/i.test(e.message)) {
