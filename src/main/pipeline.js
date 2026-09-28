@@ -27,7 +27,7 @@ function freePath(p) {
 }
 
 const fmtSec = (s) => (s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${String(s % 60).padStart(2, "0")} с`);
-const DISK_BYTES_PER_SEC = 130_000; // замерено: API Диска принимает ~127 КБ/с независимо от канала
+const DISK_BYTES_PER_SEC = 130_000; // если сработает ограничение Диска: ~127 КБ/с (замерено)
 
 /**
  * Копия на Диске живёт дольше одного перевода: job.diskPath сохраняется, чтобы «Перевести заново»
@@ -260,23 +260,31 @@ async function uploadCopy(job, work, token, step, signal) {
     throw new Error(`На Яндекс Диске не хватает места: нужно ~${size(lightSize)}, свободно ${size(diskFree)}. `
       + "Освободите место на Диске (и очистите его Корзину) и нажмите «Попробовать снова».");
   }
-  // Диск принимает файл со скоростью ~127 КБ/с. Сколько байт ушло из программы — не показатель:
-  // сеть и VPN-клиент забирают в буфер десятки мегабайт сразу, а потом отправляют медленно.
-  // Поэтому ход загрузки показываем по таймеру, по оценке этой скорости.
-  const expectedSec = lightSize / DISK_BYTES_PER_SEC;
+  // Обычно загрузка идёт на полной скорости (см. UPLOAD_LINK_HEADERS в yadisk.js) — показываем
+  // отправленные байты и скорость. Если Яндекс всё же ограничит скорость (~127 КБ/с), байты уйдут
+  // в буфер сети за секунды, а сервер будет принимать файл минутами — тогда фаза «ожидания»
+  // с оценкой по этой скорости.
   const t0 = Date.now();
-  const tick = () => {
+  let timer = null;
+  const waiting = () => {
     const elapsed = (Date.now() - t0) / 1000;
+    const expectedSec = lightSize / DISK_BYTES_PER_SEC;
     const left = Math.max(0, Math.ceil(expectedSec - elapsed));
     step("upload", {
-      progress: Math.min(0.99, elapsed / expectedSec),
-      detail: `${size(lightSize)} · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
+      progress: Math.min(0.99, Math.max(0.95, elapsed / expectedSec)),
+      detail: `Диск принимает файл · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
     });
   };
-  tick();
-  const timer = setInterval(tick, 1000);
+  step("upload", { progress: 0, detail: `0 из ${size(lightSize)}` });
   try {
-    job.diskPath = await disk.upload(token, light, null, signal);
+    job.diskPath = await disk.upload(token, light, ({ phase, sent }) => {
+      if (phase === "sending") {
+        const sec = Math.max(0.001, (Date.now() - t0) / 1000);
+        step("upload", { progress: 0.95 * sent / lightSize, detail: `${size(sent)} из ${size(lightSize)} · ${(sent / MB / sec).toFixed(1)} МБ/с` });
+      } else if (!timer) {
+        timer = setInterval(waiting, 1000);
+      }
+    }, signal);
   } finally {
     clearInterval(timer);
   }

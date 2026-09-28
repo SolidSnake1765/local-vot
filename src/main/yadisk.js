@@ -1,6 +1,5 @@
 // Яндекс Диск через официальный REST API: загрузка в папку приложения
 // («Приложения/<имя приложения>»), публикация, снятие публикации, удаление.
-// Загрузку через API Диск режет примерно до 127 КБ/с — поэтому показываем прогресс и скорость.
 import { createReadStream, statSync } from "node:fs";
 import https from "node:https";
 import path from "node:path";
@@ -9,13 +8,19 @@ const API = "https://cloud-api.yandex.net/v1/disk";
 const RETRY_DELAYS = [2_000, 5_000, 10_000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(token, method, endpoint, params = {}, signal) {
+// Диск режет загрузку через API до ~128 КиБ/с для видео, архивов и т.п. — скорость назначается
+// при выдаче ссылки на загрузку. Если запросить ссылку от имени официальной программы Диска,
+// ограничения нет (так делает библиотека yadisk, spoof_user_agent). Проверено 2026-09-29:
+// 20 МБ за 1 с вместо 160 с. Намеренное ограничение Яндекса — лазейку могут закрыть.
+const UPLOAD_LINK_HEADERS = { "User-Agent": 'Yandex.Disk {"os":"windows"}' };
+
+async function api(token, method, endpoint, params = {}, signal, extraHeaders = {}) {
   const url = `${API}${endpoint}?${new URLSearchParams(params)}`;
   // Диск иногда отвечает 500/503 на ровном месте — повторяем; 4xx (нет прав, нет файла) не повторяем
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
-      res = await fetch(url, { method, headers: { Authorization: `OAuth ${token}` }, signal });
+      res = await fetch(url, { method, headers: { ...extraHeaders, Authorization: `OAuth ${token}` }, signal });
     } catch (e) {
       if (signal?.aborted || attempt >= RETRY_DELAYS.length) throw e;
       await sleep(RETRY_DELAYS[attempt]);
@@ -52,8 +57,8 @@ function putFile(href, file, onProgress, signal) {
       sent += chunk.length;
       onProgress?.({ phase: "sending", sent, size });
     });
-    // Байты уходят из программы за секунды (их забирает сеть / VPN-клиент), а сервер Диска
-    // отвечает «принято» только минуты спустя (~127 КБ/с от размера) — это отдельная фаза ожидания.
+    // Если ограничение скорости всё же сработало, байты уходят из программы за секунды (их забирает
+    // сеть / VPN-клиент), а сервер отвечает «принято» минуты спустя — это отдельная фаза ожидания.
     stream.on("end", () => onProgress?.({ phase: "waiting", sent: size, size }));
     stream.on("error", reject);
     stream.pipe(req);
@@ -63,7 +68,8 @@ function putFile(href, file, onProgress, signal) {
 /** Загружает файл в папку приложения, возвращает путь на Диске (app:/...). */
 export async function upload(token, file, onProgress, signal) {
   const diskPath = `app:/${Date.now()}-${path.basename(file).replace(/[^\w.-]+/g, "_")}`;
-  const { href } = await api(token, "GET", "/resources/upload", { path: diskPath, overwrite: "true" }, signal);
+  const { href } = await api(token, "GET", "/resources/upload", { path: diskPath, overwrite: "true" }, signal,
+    UPLOAD_LINK_HEADERS);
   await putFile(href, file, onProgress, signal);
   return diskPath;
 }
