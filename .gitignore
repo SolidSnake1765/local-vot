@@ -8,3 +8,6 @@ out/
 .yandex-token.json
 tools/
 samples/
+
+# рабочие заметки проекта — только локально, на GitHub не выкладывать (решение пользователя)
+HANDOFF-local-vot.md
