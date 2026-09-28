@@ -23,9 +23,9 @@ jobs:
     name: Windows x64
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -41,7 +41,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false" # подписи нет — не искать сертификат
 
       - name: Файлы сборки (на странице запуска, 7 дней)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Local-VOT-windows
           path: |
