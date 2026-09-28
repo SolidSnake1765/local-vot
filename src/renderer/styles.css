@@ -110,7 +110,7 @@ select {
 .action-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* тумблер */
-.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.switch { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
 .switch-track { position: relative; width: 36px; height: 20px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); transition: background .15s, border-color .15s; }
 .switch-thumb { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
