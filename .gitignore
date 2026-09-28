@@ -11,3 +11,8 @@ samples/
 
 # рабочие заметки проекта — только локально, на GitHub не выкладывать (решение пользователя)
 HANDOFF-local-vot.md
+
+# ключи Яндекса, вшитые при сборке (scripts/embed-credentials.mjs)
+src/main/credentials.json
+# собранные программы
+dist/

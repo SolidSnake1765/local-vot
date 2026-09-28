@@ -3,6 +3,7 @@
 import { createReadStream, statSync } from "node:fs";
 import https from "node:https";
 import path from "node:path";
+import { log } from "./log.js";
 
 const API = "https://cloud-api.yandex.net/v1/disk";
 const RETRY_DELAYS = [2_000, 5_000, 10_000];
@@ -23,6 +24,7 @@ async function api(token, method, endpoint, params = {}, signal, extraHeaders = 
       res = await fetch(url, { method, headers: { ...extraHeaders, Authorization: `OAuth ${token}` }, signal });
     } catch (e) {
       if (signal?.aborted || attempt >= RETRY_DELAYS.length) throw e;
+      log.warn("Диск", `${method} ${endpoint}: сбой сети, повтор ${attempt + 1}`, e);
       await sleep(RETRY_DELAYS[attempt]);
       continue;
     }
@@ -30,9 +32,11 @@ async function api(token, method, endpoint, params = {}, signal, extraHeaders = 
     const data = text ? JSON.parse(text) : {};
     if (res.ok) return data;
     if (res.status >= 500 && attempt < RETRY_DELAYS.length) {
+      log.warn("Диск", `${method} ${endpoint}: ответ ${res.status}, повтор ${attempt + 1}`);
       await sleep(RETRY_DELAYS[attempt]);
       continue;
     }
+    log.warn("Диск", `${method} ${endpoint}: ответ ${res.status}`, data.message ?? data.error ?? text.slice(0, 300));
     if (res.status === 401) throw new Error("Вход в Яндекс устарел — войдите заново");
     if (res.status === 507) throw new Error("На Яндекс Диске не хватает места");
     throw new Error(`Диск: ${data.message ?? data.error ?? text} (${res.status})`);

@@ -1,6 +1,6 @@
 // Работа с видео через ffmpeg (встроенный ffmpeg-static; если его нет — системный).
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import ffmpegStatic from "ffmpeg-static";
@@ -13,6 +13,15 @@ const FFMPEG = bundled && existsSync(bundled) ? bundled : "ffmpeg";
 const FILTER_SCRIPT_FLAG = FFMPEG === "ffmpeg" ? "-/filter_complex" : "-filter_complex_script";
 
 const RAMP = 0.2; // плавность приглушения оригинала, с
+
+// куда класть временные файлы (граф фильтров, кусок для прослушивания): главный процесс задаёт папку
+// программы — у портативной версии она внутри её папки data; без этого — системная временная папка
+let tempDir = tmpdir();
+export function setTempDir(dir) { tempDir = dir; }
+function tempFile(name) {
+  mkdirSync(tempDir, { recursive: true });
+  return path.join(tempDir, name);
+}
 
 function ffmpeg(args, { duration, onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -336,7 +345,7 @@ function mixFilter(opts, analysis, offset = 0) {
 
 /** ffmpeg с графом фильтров из файла (длинный граф не влезает в командную строку Windows). */
 async function withFilterScript(filter, run) {
-  const script = path.join(tmpdir(), `local-vot-filter-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+  const script = tempFile(`filter-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(script, filter);
   try {
     return await run(script);
@@ -408,7 +417,7 @@ export async function mixAudio(orig, voice, out, opts = {}, duration, onProgress
 export async function renderPreview(orig, voice, start, length, opts = {}, signal) {
   const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
   const { filter, autoGainDb } = mixFilter(opts, analysis, start);
-  const out = path.join(tmpdir(), `local-vot-preview-${process.pid}-${Date.now()}.m4a`);
+  const out = tempFile(`preview-${process.pid}-${Date.now()}.m4a`);
   const cut = (from) => ["-ss", Math.max(0, from).toFixed(3), "-t", String(length)];
   // копия звука начинается раньше видео на свою задержку — берём кусок с поправкой на неё
   const origArgs = typeof orig === "string" ? [...cut(start), "-i", orig] : [...cut(start - orig.offset), "-i", orig.path];

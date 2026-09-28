@@ -4,12 +4,25 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
-import { loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
+import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
-import { existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { describeMix, origAudio, origAudioPath, runJob, STEPS, translationCacheDir } from "./pipeline.js";
-import { renderPreview } from "./media.js";
+import { renderPreview, setTempDir } from "./media.js";
+import { isPortable, setupDataPaths, workRoot } from "./paths.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
+import { hide, hideVideo, initLog, log, logDir } from "./log.js";
+import os from "node:os";
+
+// портативная версия — все данные в папке data рядом с программой (до готовности приложения)
+setupDataPaths();
+setTempDir(workRoot());
+initLog(path.join(app.getPath("userData"), "logs"));
+// ключ приложения и папка сохранения — личное, в журнале их не будет
+try { hide(getCredentials().secret, "<секрет приложения>"); } catch { /* ключей нет — войти не получится, это видно и так */ }
+hide(loadSettings().outputDir, "<папка сохранения>");
+process.on("uncaughtException", (e) => log.error("программа", e));
+process.on("unhandledRejection", (e) => log.error("программа", e instanceof Error ? e : new Error(String(e))));
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // всё, что читает встроенный ffmpeg; тот же список показывает интерфейс
@@ -25,6 +38,7 @@ const send = (channel, payload) => win?.webContents.send(channel, payload);
 // diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
 const jobs = new Map();
 const queue = [];
+let jobCounter = 0; // номер видео в журнале: «видео #3» вместо имени файла
 // порядок карточек в списке (id сверху вниз): очередь выполняется в этом порядке, его меняют перетаскиванием
 let order = [];
 let running = false;
@@ -62,6 +76,10 @@ async function pump() {
   running = true;
   job.state = "running";
   send("job:update", { id: job.id, state: "running" });
+  const scope = `видео #${job.no}`;
+  const t0 = Date.now();
+  log.info(scope, job.mode === "remux" ? "пересборка из готового перевода"
+    : `перевод: ${job.lively ? "живые" : "обычные"} голоса, язык ${job.lang}${job.replace ? ", заменить прежнюю версию" : ""}`);
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
@@ -72,8 +90,10 @@ async function pump() {
       soundUsed = pickSound(options);
       return options;
     };
-    currentRun = runJob(job, { getOptions, token, mode: job.mode },
-      (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
+    currentRun = runJob(job, { getOptions, token, mode: job.mode }, (patch) => {
+      if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
+      send("job:update", { id: job.id, ...patch });
+    }, job.controller.signal);
     const { outputs, lively, lang } = await currentRun;
     const { files, stuck } = await replaceOutputs(job.replace ? (job.outputs ?? []) : [], outputs);
     job.outputs = [...(job.replace ? [] : job.outputs ?? []), ...files];
@@ -83,11 +103,15 @@ async function pump() {
     job.state = "done";
     job.voiceUsed = lively;
     job.langUsed = lang;
+    log.info(scope, `готово за ${Math.round((Date.now() - t0) / 1000)} с: ${files.map((p) => path.extname(p)).join(", ")}`
+      + (stuck ? `; прежнюю версию убрать не удалось (файлов: ${stuck})` : ""), soundUsed);
     send("job:update", { id: job.id, state: "done", outputs: job.outputs, voiceUsed: lively, langUsed: lang,
       hasTranslation: true, preview: previewInfo(job),
       note: stuck ? `Прежнюю версию убрать не удалось (файлов: ${stuck}) — возможно, она открыта в плеере. Новая сохранена рядом.` : "" });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
+    if (job.state === "cancelled") log.info(scope, `отменено через ${Math.round((Date.now() - t0) / 1000)} с`);
+    else log.error(scope, e);
     // перевод получен, а сохранить не вышло — звук для карточки всё равно закрепляем (от настроек по умолчанию)
     if (job.translation && !job.sound) job.sound = pickSound(loadSettings());
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
@@ -203,7 +227,12 @@ function addJobs(paths) {
     }
     inList.add(key);
     // без «Запускать сразу» видео ждёт кнопки «Старт» / «Запустить все» — можно расставить порядок
-    const job = { id: randomUUID(), file, name: path.basename(file), state: settings.autoStart ? "queued" : "idle",
+    const no = ++jobCounter;
+    hideVideo(file, no);
+    let bytes = 0;
+    try { bytes = statSync(file).size; } catch { /* размер не важен для добавления */ }
+    log.info(`видео #${no}`, `добавлено: ${path.extname(file).slice(1).toUpperCase()}, ${(bytes / 1024 ** 3).toFixed(2)} ГБ`);
+    const job = { id: randomUUID(), no, file, name: path.basename(file), state: settings.autoStart ? "queued" : "idle",
       controller: new AbortController(), lively, lang, diskPath: null, duration: null, voiceUsed: null, langUsed: null };
     jobs.set(job.id, job);
     order.push(job.id);
@@ -224,6 +253,10 @@ function addJobs(paths) {
     error = `Не подходит: ${names} — это не видео или такой формат не поддерживается.`
       + ` Подходят: ${VIDEO_EXT.map((e) => e.toUpperCase()).join(", ")}.`;
     if (added.length) error = `Добавлено видео: ${added.length}. ${error}`;
+  }
+  if (skipped.translated || skipped.inList || skipped.outputs || rejected.length) {
+    log.info("очередь", `пропущено: уже переведены ${skipped.translated}, уже в списке ${skipped.inList}, `
+      + `наши файлы ${skipped.outputs}, не видео ${rejected.length}`);
   }
   return { added, note: text, error };
 }
@@ -273,6 +306,7 @@ ipcMain.handle("jobs:preview", async (_e, id, start) => {
     // какие настройки применились — чтобы на слух не гадать, дошла ли смена настроек
     return { ok: true, data, start: from, note: describeMix(settings, autoGainDb) };
   } catch (e) {
+    if (!controller.signal.aborted) log.warn(`видео #${job.no}`, "прослушивание не собралось", e);
     return { ok: false, error: controller.signal.aborted ? "" : e.message };
   } finally {
     if (previewControllers.get(id) === controller) previewControllers.delete(id);
@@ -299,6 +333,7 @@ async function removeDiskCopy(job) {
 
 /** Останавливает всё, ждёт текущее задание (не дольше 20 с) и убирает копии с Диска. */
 async function shutdown() {
+  log.info("выход", `закрытие программы; видео в списке: ${jobs.size}${running ? ", идёт перевод — прерываем" : ""}`);
   queue.length = 0;
   for (const j of jobs.values()) j.controller.abort();
   if (currentRun) {
@@ -308,7 +343,7 @@ async function shutdown() {
     Promise.all([...jobs.values()].map(removeDiskCopy)),
     new Promise((r) => setTimeout(r, 20_000)),
   ]);
-  rmSync(path.join(app.getPath("temp"), "local-vot"), { recursive: true, force: true });
+  rmSync(workRoot(), { recursive: true, force: true });
 }
 
 /** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи). */
@@ -317,10 +352,14 @@ async function purgeLeftovers() {
   if (!token) return;
   const { deletePermanently } = loadSettings();
   const inUse = new Set([...jobs.values()].map((j) => j.diskPath).filter(Boolean));
+  let removed = 0;
   for (const p of await disk.listAppFolder(token)) {
     if (inUse.has(p)) continue;
-    await disk.remove(token, p, { permanently: deletePermanently }).catch(() => {});
+    await disk.remove(token, p, { permanently: deletePermanently })
+      .then(() => { removed++; })
+      .catch((e) => log.warn("Диск", "не удалось убрать старую копию", e));
   }
+  if (removed) log.info("Диск", `убрано копий с прошлого запуска: ${removed}`);
 }
 
 // ---------- IPC ----------
@@ -346,24 +385,43 @@ ipcMain.handle("auth:login", async () => {
       shell.openExternal(code.url);
     }, loginController.signal);
     purgeLeftovers();
+    log.info("вход", "вход в Яндекс выполнен");
     return { ok: true, status: await authStatus() };
   } catch (e) {
+    if (!/отмен/i.test(e.message)) log.warn("вход", "вход в Яндекс не удался", e);
     return { ok: false, error: e.message };
   } finally {
     loginController = null;
   }
 });
 ipcMain.handle("auth:cancel", () => loginController?.abort());
-ipcMain.handle("auth:logout", () => auth.logout());
+ipcMain.handle("auth:logout", () => { log.info("вход", "выход из Яндекса"); return auth.logout(); });
 ipcMain.handle("auth:openPage", (_e, url) => {
   // открываем только страницы Яндекса — адрес приходит из интерфейса
   if (/^https:\/\/([a-z0-9-]+\.)*(ya\.ru|yandex\.ru)\//.test(url)) shell.openExternal(url);
 });
 
+// страница программы на GitHub — из package.json (repository.url), без «git+» и «.git»
+const REPO_URL = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"));
+    const url = (pkg.repository?.url ?? pkg.repository ?? "").replace(/^git\+/, "").replace(/\.git$/, "");
+    return /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(url) ? url : "";
+  } catch {
+    return "";
+  }
+})();
 ipcMain.handle("app:info", () => ({ steps: STEPS, version: app.getVersion(), languages: SOURCE_LANGS, livelyLang: LIVELY_LANG,
-  videoExt: VIDEO_EXT }));
+  videoExt: VIDEO_EXT, repoUrl: REPO_URL, portable: isPortable() }));
+ipcMain.handle("app:openRepo", () => { if (REPO_URL) shell.openExternal(REPO_URL); });
 ipcMain.handle("settings:get", () => loadSettings());
-ipcMain.handle("settings:set", (_e, patch) => saveSettings(patch));
+ipcMain.handle("settings:set", (_e, patch) => {
+  if (patch?.outputDir) hide(patch.outputDir, "<папка сохранения>");
+  return saveSettings(patch);
+});
+// ошибки окна (интерфейса) — в тот же журнал
+ipcMain.handle("log:renderer", (_e, message) => log.error("окно", String(message).slice(0, 4000)));
+ipcMain.handle("app:openLogs", () => { if (logDir()) shell.openPath(logDir()); });
 
 ipcMain.handle("dialog:pickVideos", async () => {
   const r = await dialog.showOpenDialog(win, {
@@ -386,6 +444,7 @@ ipcMain.handle("jobs:add", (_e, files) => addJobs(files));
 ipcMain.handle("jobs:cancel", (_e, id) => {
   const job = jobs.get(id);
   if (!job) return;
+  log.info(`видео #${job.no}`, "отмена по кнопке");
   job.controller.abort();
   const i = queue.indexOf(job);
   if (i >= 0) {
@@ -522,8 +581,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  log.info("запуск", `Local VOT ${app.getVersion()} (${isPortable() ? "портативная" : app.isPackaged ? "установленная" : "разработка"}), `
+    + `Windows ${os.release()} ${process.arch}, Electron ${process.versions.electron}, ffmpeg встроенный`);
   // временные файлы и сохранённые переводы прошлого запуска (если он завершился аварийно)
-  rmSync(path.join(app.getPath("temp"), "local-vot"), { recursive: true, force: true });
+  rmSync(workRoot(), { recursive: true, force: true });
   createWindow();
   purgeLeftovers();
 });

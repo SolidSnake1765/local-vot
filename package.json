@@ -6,9 +6,12 @@
   "main": "src/main/main.js",
   "type": "module",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "node scripts/embed-credentials.mjs && electron-builder --win --x64 --publish never && node scripts/pack-portable.mjs"
   },
-  "author": "SolidSnake1765",
+  "author": {
+    "name": "SolidSnake"
+  },
   "license": "MIT",
   "dependencies": {
     "@vot.js/core": "^3.1.4",
@@ -16,6 +19,59 @@
     "ffmpeg-static": "^5.2.0"
   },
   "devDependencies": {
-    "electron": "^44.4.5"
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SolidSnake1765/local-vot.git"
+  },
+  "homepage": "https://github.com/SolidSnake1765/local-vot",
+  "build": {
+    "appId": "io.github.solidsnake1765.localvot",
+    "productName": "Local VOT",
+    "copyright": "© 2026 SolidSnake",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
+    "win": {
+      "icon": "assets/icon-512.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Local VOT",
+      "installerLanguages": [
+        "ru_RU"
+      ],
+      "language": "1049",
+      "include": "build/installer.nsh",
+      "artifactName": "Local-VOT-${version}-setup.${ext}"
+    },
+    "electronLanguages": [
+      "ru",
+      "en-US"
+    ]
   }
 }

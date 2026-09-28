@@ -2,12 +2,18 @@
 import { app } from "electron";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-/** ClientID / Client secret приложения с oauth.yandex.ru. Пока — из .env в корне проекта. */
+/**
+ * ClientID / Client secret приложения с oauth.yandex.ru. При разработке — из .env в корне проекта,
+ * в собранной программе — из credentials.json рядом с этим файлом (его пишет scripts/embed-credentials.mjs).
+ */
 export function getCredentials() {
   const envFile = path.join(app.getAppPath(), ".env");
   if (existsSync(envFile)) process.loadEnvFile(envFile);
-  const { YANDEX_CLIENT_ID: id, YANDEX_CLIENT_SECRET: secret } = process.env;
+  let { YANDEX_CLIENT_ID: id, YANDEX_CLIENT_SECRET: secret } = process.env;
+  const embedded = path.join(path.dirname(fileURLToPath(import.meta.url)), "credentials.json");
+  if ((!id || !secret) && existsSync(embedded)) ({ id, secret } = JSON.parse(readFileSync(embedded, "utf8")));
   if (!id || !secret) {
     throw new Error("Не заданы ключи приложения Яндекса: YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET в файле .env");
   }

@@ -1,12 +1,13 @@
 // Одно задание перевода: видео → облегчённая копия → Диск → перевод Яндекса →
 // убрать файл с Диска → сохранить результат рядом с видео (или в выбранную папку).
-import { app } from "electron";
 import { copyFileSync, existsSync, mkdirSync, rmSync, statfsSync, statSync } from "node:fs";
 import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
 import { analyzeVoice, audioKbps, audioOffset, makeLight, measureLoudness, mixAudio, mkvPlan, mux, probe, videoPlan } from "./media.js";
 import { detectedName, langName, LIVELY_LANG } from "./languages.js";
+import { workRoot } from "./paths.js";
+import { log } from "./log.js";
 
 export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
@@ -42,7 +43,7 @@ const DISK_BYTES_PER_SEC = 130_000; // если сработает ограни�
  */
 export async function runJob(job, { getOptions, token, mode = "translate" }, emit, signal) {
   const { file } = job;
-  const work = path.join(app.getPath("temp"), "local-vot", `${job.id}-${Date.now()}`);
+  const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
   let current = null;
@@ -121,6 +122,9 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
         // формат исходника (если можно), иначе MKV; не собралось в формате исходника — пробуем MKV
         const srcExt = path.extname(file).slice(1).toLowerCase();
         let plan = videoPlan(srcExt, src.audioCodec, options.videoFormat !== "mkv");
+        log.info(`видео #${job.no}`, `сохранение видео: .${plan.ext}, перевод ${plan.voice} ${audioKbps(plan.voice, src.audio)} кбит/с, `
+          + `оригинал ${plan.origCodec === "copy" ? "без пережатия" : plan.origCodec}${plan.reason ? `, MKV: ${plan.reason}` : ""}`
+          + `${premixed ? ", звук из готовой .m4a" : ""}${options.fastAudio ? ", быстрое кодирование" : ""}`);
         const build = (p) => {
           pending = freePath(path.join(outDir, `${name} [${tag}].${p.ext}`));
           const out = pending;
@@ -133,6 +137,7 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
           built = await build(plan);
         } catch (e) {
           if (signal?.aborted || plan.ext === "mkv" || diskFullError(e)) throw e;
+          log.warn(`видео #${job.no}`, `.${plan.ext} не собрался — повтор в MKV`, e);
           rmSync(pending, { force: true });
           plan = mkvPlan(`${srcExt.toUpperCase()} не принял картинку или звук этого видео`);
           built = await build(plan);
@@ -181,12 +186,12 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
 
 /** Папка, где хранится последний полученный перевод видео (для пересборки без Яндекса). */
 export function translationCacheDir(jobId) {
-  return path.join(app.getPath("temp"), "local-vot", "cache", jobId);
+  return path.join(workRoot(), "cache", jobId);
 }
 
 /** Звук оригинала без изменений — делается вместе с облегчённой копией; живёт, пока видео в списке. */
 export function origAudioPath(jobId) {
-  return path.join(app.getPath("temp"), "local-vot", "cache", `${jobId}-orig.mka`);
+  return path.join(workRoot(), "cache", `${jobId}-orig.mka`);
 }
 
 /** Откуда брать звук оригинала: из сохранённой копии (с её задержкой), если она есть, иначе из самого видео. */
@@ -295,6 +300,8 @@ async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
   step("light", { state: "active", detail: "Проверяем видео" });
   const { duration, audioCopyable, start, audio } = await probe(job.file);
   job.duration = duration;
+  log.info(`видео #${job.no}`, `исходник: ${Math.round(duration)} с, ${size(statSync(job.file).size)}, `
+    + `звук ${audio.codec} ${audio.kbps ?? "?"} кбит/с ${audio.channels} кан.${audioCopyable ? " (в копию без пережатия)" : ""}`);
   // облегчённая копия ≈ звук + чёрный кадр: ~20–40 КБ на секунду видео; копия звука оригинала — столько же
   ensureSpace(work, duration * 80_000 + 50 * MB, "для временной облегчённой копии");
   const light = path.join(work, "light.mp4");
@@ -357,7 +364,12 @@ async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
  * (bypassCache не помогает), а после переопубликации Диск выдаёт новую, и перевод делается заново.
  */
 async function translateOnce(job, work, token, step, emit, signal) {
-  const onStatus = (msg) => step("translate", { detail: msg });
+  let lastStatus = "";
+  const onStatus = (msg) => {
+    if (msg !== lastStatus) log.info(`видео #${job.no}`, `Яндекс: ${msg}`);
+    lastStatus = msg;
+    step("translate", { detail: msg });
+  };
   const base = path.join(work, "yandex");
   let lively = Boolean(job.lively);
   // живые голоса — только с английского (и не с автоопределением), интерфейс держит это же правило
@@ -380,10 +392,13 @@ async function translateOnce(job, work, token, step, emit, signal) {
       result = await translate(url, job.duration, base, onStatus, signal, { lively, token, lang });
     } catch (e) {
       if (!lively || signal.aborted) throw e;
+      log.warn(`видео #${job.no}`, "живые голоса не получились — обычными", e);
       // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
       onStatus("Живые голоса не получились, переводим обычными");
       result = await translate(url, job.duration, base, onStatus, signal, { lang });
     }
+    log.info(`видео #${job.no}`, `перевод получен: живые голоса ${result.lively ? "да" : "нет"}, `
+      + `найденный язык ${result.detectedLang || "совпал с указанным"}, субтитров ${result.subsCount ?? 0}`);
     checkLanguage(lang, lively, result.detectedLang);
     lively = result.lively;
     const langText = lang === "auto"

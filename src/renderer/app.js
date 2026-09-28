@@ -1,5 +1,8 @@
 // Интерфейс: перетаскивание видео, вход в Яндекс, очередь заданий, настройки.
 const api = window.api;
+// ошибки интерфейса — в журнал программы (иначе их никто не увидит)
+window.addEventListener("error", (e) => api.logError(`${e.message} (${e.filename?.split("/").pop()}:${e.lineno})${e.error?.stack ? "\n" + e.error.stack : ""}`));
+window.addEventListener("unhandledrejection", (e) => api.logError(`необработанная ошибка: ${e.reason?.stack ?? e.reason}`));
 const $ = (id) => document.getElementById(id);
 
 const STATE_LABEL = { idle: "Ожидает запуска", queued: "В очереди", running: "Идёт перевод", done: "Готово", error: "Ошибка", cancelled: "Отменено" };
@@ -548,7 +551,10 @@ const info = await api.info();
 STEPS = info.steps;
 LANGS = info.languages;
 LIVELY_LANG = info.livelyLang;
-$("appVersion").textContent = `v${info.version}`;
+$("appVersion").textContent = `v${info.version}${info.portable ? " · портативная" : ""}`;
+$("repoBtn").hidden = !info.repoUrl;
+$("repoBtn").onclick = () => api.openRepo();
+$("openLogs").onclick = () => api.openLogs();
 $("dzFormats").textContent = info.videoExt.map((e) => e.toUpperCase()).join(", ");
 await initSettings();
 await refreshAccount();

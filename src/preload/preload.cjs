@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld("api", {
   cancelLogin: () => ipcRenderer.invoke("auth:cancel"),
   logout: () => ipcRenderer.invoke("auth:logout"),
   openPage: (url) => ipcRenderer.invoke("auth:openPage", url),
+  openRepo: () => ipcRenderer.invoke("app:openRepo"),
+  openLogs: () => ipcRenderer.invoke("app:openLogs"),
+  logError: (message) => ipcRenderer.invoke("log:renderer", message),
 
   getSettings: () => ipcRenderer.invoke("settings:get"),
   setSettings: (patch) => ipcRenderer.invoke("settings:set", patch),
