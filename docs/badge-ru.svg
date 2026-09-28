@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="116" height="20" role="img" aria-label="язык: Русский">
+  <title>язык: Русский</title>
+  <clipPath id="r"><rect width="116" height="20" rx="3"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="38" height="20" fill="#555"/>
+    <rect x="38" width="78" height="20" fill="#f6f8fa"/>
+  </g>
+  <g font-family="Verdana,DejaVu Sans,Geneva,sans-serif" font-size="11">
+    <text x="19" y="14" fill="#fff" text-anchor="middle">язык</text>
+    <text x="44" y="14" fill="#24292f">Русский</text>
+  </g>
+  <!-- флаг России -->
+  <g transform="translate(96 5)">
+    <rect width="15" height="10" fill="#fff" stroke="#d0d7de" stroke-width="0.5"/>
+    <rect y="3.33" width="15" height="3.34" fill="#0039A6"/>
+    <rect y="6.67" width="15" height="3.33" fill="#D52B1E"/>
+  </g>
+</svg>
