@@ -1,0 +1,67 @@
+# Сборка Local VOT на серверах GitHub.
+# Запуск: вкладка Actions → «Сборка» → Run workflow. Собирается последний коммит выбранной ветки.
+#   Галочка «Создать выпуск» выключена — пробная сборка: файлы на странице запуска (хранятся 7 дней).
+#   Включена — черновик выпуска v<версия из package.json> в Releases с установщиком и портативной версией
+#   (публикует его автор вручную кнопкой Publish).
+# Ключи приложения Яндекса берутся из секретов репозитория YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET
+# (Settings → Secrets and variables → Actions) и вшиваются в программу при сборке.
+name: Сборка
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Создать выпуск (черновик в Releases)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # нужно только для создания выпуска
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Сборка установщика и портативной версии
+        run: npm run dist
+        env:
+          YANDEX_CLIENT_ID: ${{ secrets.YANDEX_CLIENT_ID }}
+          YANDEX_CLIENT_SECRET: ${{ secrets.YANDEX_CLIENT_SECRET }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false" # подписи нет — не искать сертификат
+
+      - name: Файлы сборки (на странице запуска, 7 дней)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Local-VOT-windows
+          path: |
+            dist/*-setup.exe
+            dist/*-portable.zip
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Черновик выпуска в Releases
+        if: ${{ inputs.release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "Выпуск $tag уже есть. Поднимите версию в package.json или удалите старый выпуск."
+            exit 1
+          }
+          gh release create $tag (Get-Item dist/*-setup.exe) (Get-Item dist/*-portable.zip) `
+            --draft --target $env:GITHUB_SHA --title "Local VOT $version" --generate-notes
