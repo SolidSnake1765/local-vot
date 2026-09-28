@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS = {
   saveAudio: false,         // звуковая дорожка отдельно: оригинал + перевод, как в видео (.m4a)
   saveVoice: false,         // только голос перевода, как его отдал Яндекс (.mp3)
   saveSubs: false,          // субтитры отдельно (.srt)
+  autoStart: false,         // запускать перевод сразу после добавления (иначе — кнопки «Старт» / «Запустить все»)
   livelyVoice: true,        // «живые голоса» Яндекса — похожи на оригинальных говорящих (только с английского)
   sourceLang: "auto",       // язык видео для новых видео, если живые голоса выключены
   voiceGain: 1.0,           // громкость перевода
@@ -46,4 +47,23 @@ export function saveSettings(patch) {
   const next = { ...loadSettings(), ...patch };
   writeFileSync(settingsFile(), JSON.stringify(next, null, 1));
   return next;
+}
+
+// ---------- размер и положение окна: как закрыли, так и откроется ----------
+const windowFile = () => path.join(app.getPath("userData"), "window.json");
+
+/** { x, y, width, height, maximized } с прошлого запуска или null. */
+export function loadWindowState() {
+  try {
+    const s = JSON.parse(readFileSync(windowFile(), "utf8"));
+    return Number.isFinite(s.width) && Number.isFinite(s.height) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveWindowState(state) {
+  try {
+    writeFileSync(windowFile(), JSON.stringify(state));
+  } catch { /* не запомнили размер — не страшно */ }
 }

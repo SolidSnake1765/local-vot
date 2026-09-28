@@ -2,7 +2,7 @@
 const api = window.api;
 const $ = (id) => document.getElementById(id);
 
-const STATE_LABEL = { queued: "В очереди", running: "Идёт перевод", done: "Готово", error: "Ошибка", cancelled: "Отменено" };
+const STATE_LABEL = { idle: "Ожидает запуска", queued: "В очереди", running: "Идёт перевод", done: "Готово", error: "Ошибка", cancelled: "Отменено" };
 let STEPS = [];
 let LANGS = [];
 let LIVELY_LANG = "en";
@@ -42,7 +42,16 @@ async function refreshAccount() {
     const b = document.createElement("b");
     b.textContent = s.name;
     text.append(b);
-    if (s.totalBytes) text.append(` · Диск ${(s.usedBytes / 1024 ** 3).toFixed(1)} из ${(s.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
+    if (s.totalBytes) {
+      text.append(` · Диск ${(s.usedBytes / 1024 ** 3).toFixed(1)} из ${(s.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
+      const meter = document.createElement("span");
+      meter.className = "disk-meter";
+      meter.title = `Занято ${Math.round((s.usedBytes / s.totalBytes) * 100)}%`;
+      const fill = document.createElement("i");
+      fill.style.width = `${Math.min(100, (s.usedBytes / s.totalBytes) * 100)}%`;
+      meter.append(fill);
+      text.append(meter);
+    }
     btn.textContent = "Выйти";
   } else {
     text.textContent = "Для перевода нужен вход в Яндекс";
@@ -138,6 +147,7 @@ function createCard(job) {
     ol.append(li);
     steps[s.id] = li;
   }
+  node.dataset.id = job.id;
   const card = { id: job.id, node, steps, state: job.state, lively: job.lively, lang: job.lang,
     voiceUsed: job.voiceUsed ?? null, langUsed: job.langUsed ?? null };
 
@@ -176,21 +186,24 @@ function createCard(job) {
     refreshActions(card);
   };
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
+  node.querySelector(".job-start").onclick = () => api.startJob(job.id);
   node.querySelector(".job-retranslate").onclick = () => api.retranslate(job.id);
   node.querySelector(".job-remux").onclick = () => api.remux(job.id);
 
-  // предпрослушивание: кусок звука с текущими настройками, собирается за доли секунды
+  // предпрослушивание: кусок звука с настройками этого видео, собирается за доли секунды
   const pos = node.querySelector(".preview-pos");
   const pTime = node.querySelector(".preview-time");
   const pPlay = node.querySelector(".preview-play");
   const pAudio = node.querySelector(".preview-audio");
   const pStatus = node.querySelector(".preview-status");
   pos.oninput = () => { pTime.textContent = fmtTime(Number(pos.value)); };
-  pPlay.onclick = async () => {
-    pStatus.classList.remove("stale");
+  let previewReq = 0; // ответ на устаревший запрос (ползунок уже сдвинули ещё раз) не проигрываем
+  const playPreview = async () => {
+    const req = ++previewReq;
     pStatus.textContent = "Готовим звук…";
     pPlay.disabled = true;
     const r = await api.preview(job.id, Number(pos.value));
+    if (req !== previewReq) return;
     pPlay.disabled = false;
     if (!r.ok) {
       pStatus.textContent = r.error;
@@ -203,7 +216,32 @@ function createCard(job) {
     pAudio.play();
     pStatus.textContent = `${fmtTime(r.start)}–${fmtTime(r.start + 20)} · ${r.note}`;
   };
-  node.querySelector(".job-remove").onclick = async () => {
+  pPlay.onclick = playPreview;
+
+  // звук этого видео: меняете ползунок — через полсекунды кусок сам звучит заново с того же места
+  const snd = {
+    orig: node.querySelector(".snd-orig"), origVal: node.querySelector(".snd-orig-val"),
+    voice: node.querySelector(".snd-voice"), voiceVal: node.querySelector(".snd-voice-val"),
+    auto: node.querySelector(".snd-auto"), modes: [...node.querySelectorAll(".snd-mode")],
+  };
+  let replayTimer = null;
+  const changeSound = (patch) => {
+    card.sound = { ...card.sound, ...patch };
+    api.setJobSound(job.id, patch);
+    renderSound(card);
+    clearTimeout(replayTimer);
+    replayTimer = setTimeout(playPreview, 450);
+  };
+  snd.orig.oninput = () => { snd.origVal.textContent = `${snd.orig.value} %`; };
+  snd.orig.onchange = () => changeSound({ originalVolume: Number(snd.orig.value) });
+  snd.voice.oninput = () => { snd.voiceVal.textContent = `${Math.round(snd.voice.value * 100)} %`; };
+  snd.voice.onchange = () => changeSound({ voiceGain: Number(snd.voice.value) });
+  snd.auto.onchange = () => changeSound({ autoLevel: snd.auto.checked });
+  for (const b of snd.modes) {
+    b.onclick = () => { if (card.sound?.mixMode !== b.dataset.mode) changeSound({ mixMode: b.dataset.mode }); };
+  }
+  node.querySelector(".snd-save").onclick = () => api.remux(job.id);
+  const remove = async () => {
     if (await api.removeJob(job.id)) {
       if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
       node.remove();
@@ -212,9 +250,12 @@ function createCard(job) {
       updateCount();
     }
   };
+  node.querySelector(".job-remove").onclick = remove;
+  node.querySelector(".job-drop").onclick = remove;
+  setupDrag(card);
 
   $("emptyHint").hidden = true;
-  $("jobs").prepend(node);
+  $("jobs").append(node);
   cards.set(job.id, card);
   setState(card, job.state);
   for (const u of early.get(job.id) ?? []) applyUpdate(card, u);
@@ -223,11 +264,14 @@ function createCard(job) {
 
 function setState(card, state) {
   card.state = state;
+  card.node.dataset.state = state;
   const badge = card.node.querySelector(".badge");
   badge.textContent = STATE_LABEL[state] ?? state;
   badge.className = `badge ${state}`;
   const active = ["queued", "running"].includes(state);
   card.node.querySelector(".job-cancel").hidden = !active;
+  card.node.querySelector(".job-start").hidden = state !== "idle";
+  card.node.querySelector(".job-drop").hidden = state !== "idle";
   // пока идёт перевод, голос и язык уже выбраны — переключатели заморожены
   card.node.querySelector(".job-lively").disabled = state === "running";
   card.node.querySelector(".job-lang").disabled = state === "running";
@@ -256,16 +300,30 @@ function setupPreview(card, info) {
     card.previewPlaced = true;
   }
   box.querySelector(".preview-time").textContent = fmtTime(Number(pos.value));
+  card.sound = info.sound;
+  card.savedSound = info.savedSound;
+  renderSound(card);
 }
 
-/** Настройки звука поменялись — прослушанный кусок уже не соответствует им. */
-function markPreviewsStale() {
-  for (const card of cards.values()) {
-    if (!card.previewUrl) continue;
-    const st = card.node.querySelector(".preview-status");
-    st.textContent = "Настройки звука изменились — нажмите «▶ 20 секунд», чтобы послушать заново";
-    st.classList.add("stale");
+const sameSound = (a, b) => a.mixMode === b.mixMode && a.originalVolume === b.originalVolume
+  && Math.abs(a.voiceGain - b.voiceGain) < 0.001 && a.autoLevel === b.autoLevel;
+
+/** Ползунки звука — по настройкам видео; «Звук изменён», если он отличается от сохранённого в файлах. */
+function renderSound(card) {
+  const s = card.sound;
+  if (!s) return;
+  const q = (sel) => card.node.querySelector(sel);
+  q(".snd-orig").value = String(s.originalVolume);
+  q(".snd-orig-val").textContent = `${s.originalVolume} %`;
+  q(".snd-voice").value = String(s.voiceGain);
+  q(".snd-voice-val").textContent = `${Math.round(s.voiceGain * 100)} %`;
+  q(".snd-auto").checked = Boolean(s.autoLevel);
+  for (const b of card.node.querySelectorAll(".snd-mode")) {
+    b.classList.toggle("on", b.dataset.mode === s.mixMode);
+    b.setAttribute("aria-pressed", String(b.dataset.mode === s.mixMode));
   }
+  q(".snd-orig").title = s.mixMode === "constant" ? "Громкость оригинала всё время" : "Громкость оригинала, пока звучит перевод";
+  q(".sound-dirty").hidden = !card.savedSound || sameSound(s, card.savedSound);
 }
 
 /**
@@ -329,14 +387,19 @@ function showOutputs(card, outputs) {
   for (const p of outputs) {
     const row = document.createElement("div");
     row.className = "output";
+    const fileName = p.split(/[\\/]/).pop();
+    const ext = document.createElement("span");
+    ext.className = "ext";
+    ext.textContent = (fileName.match(/\.([^.]+)$/)?.[1] ?? "").toUpperCase();
     const name = document.createElement("span");
-    name.textContent = p.split(/[\\/]/).pop();
+    name.className = "file";
+    name.textContent = fileName;
     name.title = p;
     const btn = document.createElement("button");
     btn.className = "btn btn-small btn-ghost";
     btn.textContent = "Показать в папке";
     btn.onclick = () => api.showItem(p);
-    row.append(name, btn);
+    row.append(ext, name, btn);
     box.append(row);
   }
 }
@@ -375,7 +438,42 @@ function applyUpdate(card, u) {
 function updateCount() {
   const n = cards.size;
   $("jobsCount").textContent = n ? `${n} видео` : "";
+  const idle = [...cards.values()].filter((c) => c.state === "idle").length;
+  $("startAll").hidden = idle === 0;
+  $("startAll").textContent = idle > 1 ? `▶ Запустить все (${idle})` : "▶ Запустить";
 }
+$("startAll").onclick = () => api.startAll();
+
+// ---------- порядок очереди: карточки перетаскиваются за ручку слева от названия ----------
+let dragged = null;
+function setupDrag(card) {
+  const { node } = card;
+  const handle = node.querySelector(".drag-handle");
+  // тянется только за ручку: иначе мешало бы выделять текст и двигать ползунки
+  handle.addEventListener("pointerdown", () => { node.draggable = true; });
+  node.addEventListener("pointerup", () => { node.draggable = false; });
+  node.addEventListener("dragstart", (e) => {
+    dragged = node;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", card.id);
+    requestAnimationFrame(() => node.classList.add("dragging"));
+  });
+  node.addEventListener("dragend", () => {
+    node.draggable = false;
+    node.classList.remove("dragging");
+    dragged = null;
+    api.reorderJobs([...$("jobs").querySelectorAll(".job")].map((el) => el.dataset.id));
+  });
+}
+// карточка встаёт перед той, над верхней половиной которой курсор, иначе — после
+$("jobs").addEventListener("dragover", (e) => {
+  if (!dragged) return;
+  e.preventDefault();
+  const over = e.target.closest(".job");
+  if (!over || over === dragged) return;
+  const box = over.getBoundingClientRect();
+  over[e.clientY < box.top + box.height / 2 ? "before" : "after"](dragged);
+});
 
 // ---------- настройки ----------
 function renderFolder(dir) {
@@ -401,7 +499,6 @@ async function initSettings() {
       const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
       syncDependent();
-      if (["mixMode", "originalVolume", "voiceGain", "autoLevel"].includes(key)) markPreviewsStale();
     });
     if (el.type === "range") el.addEventListener("input", syncDependent);
   }
@@ -416,8 +513,7 @@ function syncDependent() {
   $("originalVolumeLabel").textContent = constant ? "Громкость оригинала — всё время" : "Громкость оригинала — пока звучит перевод";
   $("mixNote").textContent = (constant
     ? "Оригинал и перевод звучат на заданных уровнях всё время."
-    : "В паузах перевода оригинал звучит в полную громкость.")
-    + " Чтобы применить к готовому видео, нажмите в карточке «Пересобрать видео».";
+    : "В паузах перевода оригинал звучит в полную громкость.");
   const saveVideo = document.querySelector('[data-setting="saveVideo"]').checked;
   document.querySelector('[data-setting="embedSubs"]').disabled = !saveVideo;
   $("videoFormat").disabled = !saveVideo;
@@ -452,6 +548,7 @@ const info = await api.info();
 STEPS = info.steps;
 LANGS = info.languages;
 LIVELY_LANG = info.livelyLang;
+$("appVersion").textContent = `v${info.version}`;
 $("dzFormats").textContent = info.videoExt.map((e) => e.toUpperCase()).join(", ");
 await initSettings();
 await refreshAccount();

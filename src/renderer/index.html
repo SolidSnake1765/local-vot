@@ -11,8 +11,11 @@
     <div class="brand">
       <img src="../../assets/icon.svg" alt="" class="logo">
       <div>
-        <div class="brand-name">Local VOT</div>
-        <div class="brand-sub">Закадровый перевод видео с английского</div>
+        <div class="brand-line">
+          <span class="brand-name">Local VOT</span>
+          <span class="author" title="Автор программы">by SolidSnake</span>
+        </div>
+        <div class="brand-sub">Закадровый перевод видео на русский</div>
       </div>
     </div>
     <div class="account" id="account">
@@ -37,9 +40,10 @@
       <div class="jobs-head">
         <h2>Очередь</h2>
         <span class="muted" id="jobsCount"></span>
+        <button class="btn btn-small start-all" id="startAll" type="button" hidden>▶ Запустить все</button>
       </div>
       <div class="jobs" id="jobs">
-        <p class="empty" id="emptyHint">Пока пусто. Добавьте видео — перевод начнётся сразу.</p>
+        <p class="empty" id="emptyHint">Пока пусто. Добавьте видео, расставьте порядок и нажмите «Запустить все».</p>
       </div>
     </section>
 
@@ -71,6 +75,8 @@
       </div>
 
       <h2>Для новых видео</h2>
+      <label class="check"><input type="checkbox" data-setting="autoStart"> Запускать перевод сразу после добавления</label>
+      <p class="note tight">Без галочки видео ждут кнопки «Старт» или «Запустить все» — можно расставить порядок.</p>
       <label class="check"><input type="checkbox" data-setting="livelyVoice"> Живые голоса</label>
       <p class="note tight">Голоса, похожие на оригинальных говорящих. Работают только с английского.</p>
       <label class="select">
@@ -79,7 +85,8 @@
       </label>
       <p class="note">У каждого видео в очереди — свои голос и язык, их можно поменять в карточке.</p>
 
-      <h2>Звук</h2>
+      <h2>Звук по умолчанию</h2>
+      <p class="note top">Для новых видео. Звук готового видео настраивается в его карточке — рядом с прослушиванием.</p>
       <label class="select">
         <span>Режим</span>
         <select data-setting="mixMode" id="mixMode">
@@ -104,6 +111,7 @@
       <h2>Яндекс Диск</h2>
       <label class="check"><input type="checkbox" data-setting="deletePermanently"> Удалять копию с Диска сразу, мимо Корзины</label>
       <p class="note">Через Диск видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром). Копия хранится закрытой, пока видео в списке, и удаляется при «Убрать из списка» или выходе.</p>
+      <footer class="panel-foot">Local VOT <span id="appVersion"></span> · автор <b>SolidSnake</b></footer>
     </aside>
   </main>
 
@@ -132,6 +140,7 @@
     <article class="job">
       <div class="job-head">
         <div class="job-title">
+          <span class="drag-handle" title="Перетащите, чтобы поменять порядок в очереди"></span>
           <span class="job-name"></span>
           <span class="badge"></span>
         </div>
@@ -142,7 +151,9 @@
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">Живые голоса</span>
           </label>
+          <button class="btn btn-small job-start" type="button">▶ Старт</button>
           <button class="btn btn-small btn-ghost job-cancel" type="button">Отменить</button>
+          <button class="btn btn-small btn-ghost job-drop" type="button" title="Убрать из списка">Убрать</button>
         </div>
       </div>
       <p class="job-note" hidden></p>
@@ -150,7 +161,7 @@
       <p class="error job-error" hidden></p>
       <div class="outputs" hidden></div>
       <div class="preview" hidden>
-        <div class="preview-title">Прослушать с текущими настройками звука</div>
+        <div class="preview-title">Звук этого видео</div>
         <div class="preview-controls">
           <input type="range" class="preview-pos" min="0" step="1" value="0">
           <span class="preview-time">0:00</span>
@@ -158,6 +169,27 @@
         </div>
         <audio class="preview-audio" controls hidden></audio>
         <p class="muted small preview-status"></p>
+        <div class="sound">
+          <div class="sound-row">
+            <span class="sound-label">Оригинал</span>
+            <input type="range" class="snd-orig" min="0" max="100" step="5" title="Громкость оригинала">
+            <b class="sound-val snd-orig-val"></b>
+            <div class="seg" role="group" aria-label="Когда приглушать оригинал">
+              <button type="button" class="seg-btn snd-mode" data-mode="duck">под переводом</button>
+              <button type="button" class="seg-btn snd-mode" data-mode="constant">всё время</button>
+            </div>
+          </div>
+          <div class="sound-row">
+            <span class="sound-label">Перевод</span>
+            <input type="range" class="snd-voice" min="0.5" max="2" step="0.1" title="Громкость перевода">
+            <b class="sound-val snd-voice-val"></b>
+            <label class="check sound-auto"><input type="checkbox" class="snd-auto"> подстроить под оригинал</label>
+          </div>
+        </div>
+        <div class="sound-dirty" hidden>
+          <span>Звук изменён — в сохранённых файлах ещё прежний</span>
+          <button class="btn btn-small snd-save" type="button">Сохранить с этим звуком</button>
+        </div>
       </div>
       <div class="job-actions" hidden>
         <div class="action-row">
@@ -166,7 +198,7 @@
         </div>
         <div class="action-row job-remux-row" hidden>
           <button class="btn btn-small btn-ghost job-remux" type="button">Пересобрать видео</button>
-          <span class="muted small">Без запроса к Яндексу: тот же перевод, но с текущими настройками звука и сохранения. Прежняя версия уйдёт в Корзину</span>
+          <span class="muted small">Без Яндекса — например, после смены «Что сохранить» или формата. Прежняя версия — в Корзину</span>
         </div>
         <div class="action-row">
           <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>

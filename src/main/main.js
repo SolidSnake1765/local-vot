@@ -1,10 +1,10 @@
 // Главный процесс: окно, вход в Яндекс, очередь заданий перевода.
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
-import { loadSettings, saveSettings } from "./config.js";
+import { loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
 import { existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { describeMix, origAudio, origAudioPath, runJob, STEPS, translationCacheDir } from "./pipeline.js";
@@ -25,6 +25,8 @@ const send = (channel, payload) => win?.webContents.send(channel, payload);
 // diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
 const jobs = new Map();
 const queue = [];
+// порядок карточек в списке (id сверху вниз): очередь выполняется в этом порядке, его меняют перетаскиванием
+let order = [];
 let running = false;
 let currentRun = null; // промис текущего задания — при выходе ждём, пока оно закроет ссылку
 
@@ -39,9 +41,19 @@ function enqueue(job, mode = "translate", replace = false) {
   job.replace = replace;
   job.state = "queued";
   queue.push(job);
+  sortQueue();
   send("job:update", { id: job.id, state: "queued", reset: true });
   queueMicrotask(pump);
 }
+
+/** Очередь — в порядке карточек в списке. */
+function sortQueue() {
+  const pos = new Map(order.map((id, i) => [id, i]));
+  queue.sort((a, b) => (pos.get(a.id) ?? Infinity) - (pos.get(b.id) ?? Infinity));
+}
+
+/** Видео ни разу не запускалось (нет ни перевода, ни копии на Диске, ни файлов) — можно вернуть в «ожидает». */
+const neverRan = (job) => !job.translation && !job.diskPath && !job.outputs?.length;
 
 async function pump() {
   if (running) return;
@@ -53,11 +65,21 @@ async function pump() {
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
-    currentRun = runJob(job, { getOptions: loadSettings, token, mode: job.mode },
+    // настройки читаются в момент сохранения: общие + звук этого видео (если его уже настраивали в карточке)
+    let soundUsed = null;
+    const getOptions = () => {
+      const options = { ...loadSettings(), ...(job.sound ?? {}) };
+      soundUsed = pickSound(options);
+      return options;
+    };
+    currentRun = runJob(job, { getOptions, token, mode: job.mode },
       (patch) => send("job:update", { id: job.id, ...patch }), job.controller.signal);
     const { outputs, lively, lang } = await currentRun;
     const { files, stuck } = await replaceOutputs(job.replace ? (job.outputs ?? []) : [], outputs);
     job.outputs = [...(job.replace ? [] : job.outputs ?? []), ...files];
+    // звук, с которым собраны файлы, закрепляется за видео: дальше его меняют только в карточке
+    job.sound = soundUsed;
+    job.savedSound = soundUsed;
     job.state = "done";
     job.voiceUsed = lively;
     job.langUsed = lang;
@@ -66,6 +88,8 @@ async function pump() {
       note: stuck ? `Прежнюю версию убрать не удалось (файлов: ${stuck}) — возможно, она открыта в плеере. Новая сохранена рядом.` : "" });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
+    // перевод получен, а сохранить не вышло — звук для карточки всё равно закрепляем (от настроек по умолчанию)
+    if (job.translation && !job.sound) job.sound = pickSound(loadSettings());
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
       hasTranslation: Boolean(job.translation), preview: previewInfo(job) });
   } finally {
@@ -178,10 +202,12 @@ function addJobs(paths) {
       continue;
     }
     inList.add(key);
-    const job = { id: randomUUID(), file, name: path.basename(file), state: "queued", controller: new AbortController(),
-      lively, lang, diskPath: null, duration: null, voiceUsed: null, langUsed: null };
+    // без «Запускать сразу» видео ждёт кнопки «Старт» / «Запустить все» — можно расставить порядок
+    const job = { id: randomUUID(), file, name: path.basename(file), state: settings.autoStart ? "queued" : "idle",
+      controller: new AbortController(), lively, lang, diskPath: null, duration: null, voiceUsed: null, langUsed: null };
     jobs.set(job.id, job);
-    queue.push(job);
+    order.push(job.id);
+    if (settings.autoStart) queue.push(job);
     added.push(publicJob(job));
   }
   queueMicrotask(pump);
@@ -206,12 +232,29 @@ function addJobs(paths) {
 const PREVIEW_SECONDS = 20;
 const previewControllers = new Map(); // id → AbortController текущей сборки куска
 
-/** Что нужно интерфейсу для ползунка: длительность и где начинается первая фраза перевода. */
+/**
+ * Что нужно блоку «Звук этого видео»: длительность, где начинается первая фраза перевода, звук видео
+ * (sound) и звук, с которым собраны сохранённые файлы (savedSound; null — файлов ещё нет).
+ */
 function previewInfo(job) {
   if (!job.translation?.analysis) return null;
   const first = job.translation.analysis.segments[0]?.[0] ?? 0;
-  return { duration: job.duration, start: Math.max(0, first - 1), length: PREVIEW_SECONDS };
+  return { duration: job.duration, start: Math.max(0, first - 1), length: PREVIEW_SECONDS,
+    sound: job.sound ?? pickSound(loadSettings()), savedSound: job.savedSound ?? null };
 }
+
+// ---------- звук видео ----------
+// У каждого видео свой звук: до первого сохранения — настройки по умолчанию (панель справа),
+// после — закреплённый за видео, его меняют ползунки в карточке.
+const SOUND_KEYS = ["mixMode", "originalVolume", "voiceGain", "autoLevel"];
+const pickSound = (o) => Object.fromEntries(SOUND_KEYS.map((k) => [k, o[k]]));
+
+ipcMain.handle("jobs:setSound", (_e, id, patch) => {
+  const job = jobs.get(id);
+  if (!job) return;
+  const clean = Object.fromEntries(Object.entries(patch ?? {}).filter(([k]) => SOUND_KEYS.includes(k)));
+  job.sound = { ...(job.sound ?? pickSound(loadSettings())), ...clean };
+});
 
 // кусок звука с текущими настройками; повторный запрос для того же видео отменяет предыдущий
 ipcMain.handle("jobs:preview", async (_e, id, start) => {
@@ -222,7 +265,7 @@ ipcMain.handle("jobs:preview", async (_e, id, start) => {
   previewControllers.set(id, controller);
   const from = Math.max(0, Math.min(Number(start) || 0, Math.max(0, job.duration - PREVIEW_SECONDS)));
   try {
-    const settings = loadSettings();
+    const settings = { ...loadSettings(), ...(job.sound ?? {}) }; // звук этого видео — как при сохранении
     // звук оригинала — из копии рядом с кэшем: прыжок по ней мгновенный даже на 40-ГБ видео
     const { data, autoGainDb } = await renderPreview(origAudio(job), job.translation.audio, from, PREVIEW_SECONDS,
       { ...settings, origLoudness: job.origLoudness ?? null, voiceAnalysis: job.translation.analysis },
@@ -347,9 +390,29 @@ ipcMain.handle("jobs:cancel", (_e, id) => {
   const i = queue.indexOf(job);
   if (i >= 0) {
     queue.splice(i, 1);
-    job.state = "cancelled";
-    send("job:update", { id, state: "cancelled" });
+    // ещё не начатое видео снова просто ждёт «Старт»; начатое раньше — «Отменено» со своими кнопками
+    job.state = neverRan(job) ? "idle" : "cancelled";
+    send("job:update", { id, state: job.state, reset: job.state === "idle" });
   }
+});
+// «Старт» у видео, которое ждёт запуска
+ipcMain.handle("jobs:start", (_e, id) => {
+  const job = jobs.get(id);
+  if (job?.state === "idle") enqueue(job);
+});
+// «Запустить все»: все ждущие — по порядку в списке
+ipcMain.handle("jobs:startAll", () => {
+  for (const id of order) {
+    const job = jobs.get(id);
+    if (job?.state === "idle") enqueue(job);
+  }
+});
+// новый порядок карточек после перетаскивания (id сверху вниз)
+ipcMain.handle("jobs:reorder", (_e, ids) => {
+  if (!Array.isArray(ids)) return;
+  const known = ids.filter((id) => jobs.has(id));
+  order = [...new Set([...known, ...order.filter((id) => jobs.has(id))])];
+  sortQueue();
 });
 // голос для видео: пока перевод не начался — просто запоминаем; после — интерфейс предложит пересоздать
 ipcMain.handle("jobs:setVoice", (_e, id, lively) => {
@@ -378,6 +441,7 @@ ipcMain.handle("jobs:remove", async (_e, id) => {
   const job = jobs.get(id);
   if (!job || ["queued", "running"].includes(job.state)) return false;
   jobs.delete(id);
+  order = order.filter((x) => x !== id);
   removeTranslationCache(job);
   removeDiskCopy(job);
   return true;
@@ -385,10 +449,29 @@ ipcMain.handle("jobs:remove", async (_e, id) => {
 ipcMain.handle("shell:showItem", (_e, p) => shell.showItemInFolder(p));
 
 // ---------- окно ----------
+/**
+ * Размер окна: как было при прошлом закрытии (если тот экран ещё подключён), иначе — крупное окно
+ * по центру (1440×940, но не больше 90 % рабочей области экрана).
+ */
+function initialBounds() {
+  const saved = loadWindowState();
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    const area = screen.getDisplayMatching(saved).workArea;
+    const visible = saved.x < area.x + area.width - 100 && saved.x + saved.width > area.x + 100
+      && saved.y >= area.y - 10 && saved.y < area.y + area.height - 100;
+    const { x, y, width, height } = saved;
+    if (visible) return { bounds: { x, y, width, height }, maximized: Boolean(saved.maximized) };
+  }
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(1440, Math.round(area.width * 0.9));
+  const height = Math.min(940, Math.round(area.height * 0.9));
+  return { bounds: { width, height }, maximized: Boolean(saved?.maximized) };
+}
+
 function createWindow() {
+  const { bounds, maximized } = initialBounds();
   win = new BrowserWindow({
-    width: 1080,
-    height: 780,
+    ...bounds,
     minWidth: 780,
     minHeight: 560,
     title: "Local VOT",
@@ -402,7 +485,12 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  if (maximized) win.maximize();
   win.loadFile(path.join(ROOT, "src", "renderer", "index.html"));
+  // размер запоминаем до всех вопросов при закрытии; у развёрнутого окна — его обычный размер
+  win.on("close", () => {
+    if (!win.isMinimized()) saveWindowState({ ...win.getNormalBounds(), maximized: win.isMaximized() });
+  });
   // брошенный в окно файл не должен открываться вместо интерфейса; внешние ссылки — в браузере
   win.webContents.on("will-navigate", (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
