@@ -26,8 +26,13 @@
       <button class="dropzone" id="dropzone" type="button">
         <span class="dz-icon" aria-hidden="true">＋</span>
         <span class="dz-title">Перетащите видео сюда</span>
-        <span class="dz-sub">или нажмите, чтобы выбрать файлы · MP4, MKV, MOV, AVI, WebM</span>
+        <span class="dz-sub">или нажмите, чтобы выбрать файлы · можно бросить и папку целиком</span>
+        <span class="dz-sub dz-formats" id="dzFormats"></span>
       </button>
+      <div class="add-row">
+        <button class="btn btn-small btn-ghost" id="pickVideoFolder" type="button">Добавить папку…</button>
+        <span class="muted small" id="addNote">Все видео папки и вложенных папок, кроме уже переведённых</span>
+      </div>
 
       <div class="jobs-head">
         <h2>Очередь</h2>
@@ -40,12 +45,21 @@
 
     <aside class="panel">
       <h2>Что сохранить</h2>
-      <label class="check"><input type="checkbox" data-setting="saveVideo"> Видео с переводом <span class="muted">.mkv</span></label>
+      <label class="check"><input type="checkbox" data-setting="saveVideo"> Видео с переводом</label>
+      <label class="select sub">
+        <span>Формат</span>
+        <select data-setting="videoFormat" id="videoFormat">
+          <option value="source">Как у исходника</option>
+          <option value="mkv">Всегда MKV</option>
+        </select>
+      </label>
+      <p class="note tight" id="videoFormatNote"></p>
       <label class="check sub"><input type="checkbox" data-setting="embedSubs"> Вшить русские субтитры</label>
       <label class="check"><input type="checkbox" data-setting="saveAudio"> Звуковую дорожку отдельно <span class="muted">.m4a</span></label>
       <p class="note tight">Оригинал + перевод, как в видео, — для плееров, которые подключают внешнюю дорожку. Не копирует само видео.</p>
       <label class="check"><input type="checkbox" data-setting="saveVoice"> Только голос перевода <span class="muted">.mp3</span></label>
       <label class="check"><input type="checkbox" data-setting="saveSubs"> Субтитры отдельно <span class="muted">.srt</span></label>
+      <p class="note warn" id="saveNone" hidden>Ничего не отмечено — перевод будет получен, но файлы не сохранятся. Отметьте нужное и нажмите в карточке «Пересобрать видео».</p>
 
       <h2>Куда</h2>
       <div class="folder">
@@ -84,6 +98,8 @@
       <label class="check"><input type="checkbox" data-setting="autoLevel"> Подстраивать перевод под громкость оригинала</label>
       <p class="note tight">Тихое видео — тише перевод, громкое — громче. Ползунок «Громкость перевода» действует поверх.</p>
       <p class="note" id="mixNote"></p>
+      <label class="check"><input type="checkbox" data-setting="fastAudio"> Быстрое кодирование звука</label>
+      <p class="note tight">Звук собирается примерно вдвое быстрее, качество чуть ниже. Без галочки звук с переводом сохраняется не хуже оригинала: битрейт как у него — от 192 до 256 кбит/с (выше AAC на слух уже не лучше).</p>
 
       <h2>Яндекс Диск</h2>
       <label class="check"><input type="checkbox" data-setting="deletePermanently"> Удалять копию с Диска сразу, мимо Корзины</label>
@@ -150,7 +166,7 @@
         </div>
         <div class="action-row job-remux-row" hidden>
           <button class="btn btn-small btn-ghost job-remux" type="button">Пересобрать видео</button>
-          <span class="muted small">Без запроса к Яндексу: тот же перевод, но с текущими настройками звука и сохранения</span>
+          <span class="muted small">Без запроса к Яндексу: тот же перевод, но с текущими настройками звука и сохранения. Прежняя версия уйдёт в Корзину</span>
         </div>
         <div class="action-row">
           <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>

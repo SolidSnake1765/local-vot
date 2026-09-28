@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, rmSync, statfsSync, statSync } fro
 import path from "node:path";
 import * as disk from "./yadisk.js";
 import { translate } from "./vot.js";
-import { analyzeVoice, makeLight, measureLoudness, mixAudio, mux, probe } from "./media.js";
+import { analyzeVoice, audioKbps, audioOffset, makeLight, measureLoudness, mixAudio, mkvPlan, mux, probe, videoPlan } from "./media.js";
 import { detectedName, langName, LIVELY_LANG } from "./languages.js";
 
 export const STEPS = [
@@ -68,7 +68,7 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
         emit({ step: "light", state: "done", detail: "" });
         emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
       } else {
-        await uploadCopy(job, work, token, step, signal);
+        await uploadCopy(job, work, token, step, signal, getOptions().fastAudio);
       }
       ({ result, lively, lang } = await translateOnce(job, work, token, step, emit, signal));
       job.translation = await keepTranslation(job, result, lively, lang, signal);
@@ -79,6 +79,12 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
     // настройки сохранения и звука — на момент сохранения, а не старта: пока видео грузилось
     // и переводилось, их могли поменять
     const options = getOptions();
+    // перевод уже получен и лежит в кэше — ошибка ничего не теряет: отметить нужное и «Пересобрать видео»
+    if (!options.saveVideo && !options.saveAudio && !options.saveVoice && !(options.saveSubs && result.subs)) {
+      throw new Error(options.saveSubs
+        ? "Отмечены только субтитры, а Яндекс их не прислал — сохранять нечего. Перевод получен: отметьте в «Что сохранить» видео или дорожку и нажмите «Пересобрать видео»."
+        : "В «Что сохранить» ничего не отмечено. Перевод получен: отметьте нужное и нажмите «Пересобрать видео» — Яндекс заново не понадобится.");
+    }
     const outDir = options.outputDir || path.dirname(file);
     mkdirSync(outDir, { recursive: true });
     const srcSize = statSync(file).size;
@@ -90,31 +96,70 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
     const tag = lively ? "RU живые" : "RU";
     let pending = null; // файл, который пишется прямо сейчас, — при сбое или отмене удаляем
     let saveNote = "";
-    const mixOpts = { ...options, origLoudness: job.origLoudness ?? null, voiceAnalysis: result.analysis };
+    const notes = []; // в каком формате сохранили и почему — в подпись шага
+    // звук оригинала (кодек, битрейт, каналы): дорожку с переводом кодируем не хуже него
+    const src = await probe(file);
+    const mixOpts = { ...options, origLoudness: job.origLoudness ?? null, voiceAnalysis: result.analysis, origInfo: src.audio };
     try {
-      if (options.saveVideo) {
-        pending = freePath(path.join(outDir, `${name} [${tag}].mkv`));
-        const out = pending;
-        const { autoGainDb } = await withSaveProgress(out, "Собираем видео", srcSize, step, (onP) =>
-          mux(file, result.audio, options.embedSubs ? result.subs : null, out, mixOpts, job.duration, onP, signal));
-        saveNote = describeMix(options, autoGainDb);
-        outputs.push(pending);
-      }
+      // звуковую дорожку — первой: видео потом берёт её готовой, без второго кодирования того же звука
+      let premixed = null;
+      let voiceCodec = null; // чем закодирована дорожка с переводом — для подписи шага
       if (options.saveAudio) {
-        // готовая звуковая дорожка: оригинал + перевод, как в видео, — для внешней дорожки в плеере
+        // готовая звуковая дорожка: оригинал + перевод, как в видео, — для внешней дорожки в плеере;
+        // звук оригинала — из копии, сделанной вместе с облегчённой (не читаем заново гигабайты видео)
         pending = freePath(path.join(outDir, `${name} [${tag}].m4a`));
         const out = pending;
         const { autoGainDb } = await withSaveProgress(out, "Собираем звуковую дорожку", job.duration * 24_000, step, (onP) =>
-          mixAudio(file, result.audio, out, mixOpts, job.duration, onP, signal));
+          mixAudio(origAudio(job), result.audio, out, mixOpts, job.duration, onP, signal));
         saveNote = describeMix(options, autoGainDb);
+        voiceCodec = "aac";
         outputs.push(pending);
+        premixed = pending;
+        pending = null;
+      }
+      if (options.saveVideo) {
+        // формат исходника (если можно), иначе MKV; не собралось в формате исходника — пробуем MKV
+        const srcExt = path.extname(file).slice(1).toLowerCase();
+        let plan = videoPlan(srcExt, src.audioCodec, options.videoFormat !== "mkv");
+        const build = (p) => {
+          pending = freePath(path.join(outDir, `${name} [${tag}].${p.ext}`));
+          const out = pending;
+          return withSaveProgress(out, "Собираем видео", srcSize, step, (onP) =>
+            mux(file, result.audio, options.embedSubs ? result.subs : null, out, { ...mixOpts, premixed }, job.duration, onP,
+              signal, p));
+        };
+        let built;
+        try {
+          built = await build(plan);
+        } catch (e) {
+          if (signal?.aborted || plan.ext === "mkv" || diskFullError(e)) throw e;
+          rmSync(pending, { force: true });
+          plan = mkvPlan(`${srcExt.toUpperCase()} не принял картинку или звук этого видео`);
+          built = await build(plan);
+        }
+        saveNote = describeMix(options, built.autoGainDb);
+        voiceCodec = plan.voice;
+        outputs.push(pending);
+        if (plan.reason) notes.push(`сохранено в MKV: ${plan.reason}`);
+        // контейнер без встроенных субтитров — кладём их рядом с тем же именем: плееры подхватывают сами
+        if (options.embedSubs && result.subs && !plan.subs) {
+          pending = freePath(pending.replace(/\.[^.\\/]+$/, ".srt"));
+          copyFileSync(result.subs, pending);
+          outputs.push(pending);
+          notes.push(`субтитры — файлом рядом: ${plan.ext.toUpperCase()} не умеет встроенные`);
+        }
+      }
+      if (voiceCodec) {
+        notes.unshift(`звук ${voiceCodec.toUpperCase()} ${audioKbps(voiceCodec, src.audio)} кбит/с`
+          + (options.fastAudio && voiceCodec === "aac" ? ", быстрое кодирование" : ""));
       }
       if (options.saveVoice) {
         pending = freePath(path.join(outDir, `${name} [${tag}, голос].mp3`));
         copyFileSync(result.audio, pending);
         outputs.push(pending);
       }
-      if (options.saveSubs && result.subs) {
+      // субтитры уже легли рядом с видео — второй такой же файл не нужен
+      if (options.saveSubs && result.subs && !outputs.some((p) => p.toLowerCase().endsWith(".srt"))) {
         pending = freePath(path.join(outDir, `${name} [RU].srt`));
         copyFileSync(result.subs, pending);
         outputs.push(pending);
@@ -124,7 +169,7 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
       if (pending) rmSync(pending, { force: true });
       throw diskFullError(e) ?? e;
     }
-    step("save", { state: "done", detail: saveNote });
+    step("save", { state: "done", detail: [saveNote, ...notes].filter(Boolean).join(" · ") });
     return { outputs, lively, lang };
   } catch (e) {
     if (current) emit({ step: current, state: "error", detail: e.message });
@@ -137,6 +182,17 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
 /** Папка, где хранится последний полученный перевод видео (для пересборки без Яндекса). */
 export function translationCacheDir(jobId) {
   return path.join(app.getPath("temp"), "local-vot", "cache", jobId);
+}
+
+/** Звук оригинала без изменений — делается вместе с облегчённой копией; живёт, пока видео в списке. */
+export function origAudioPath(jobId) {
+  return path.join(app.getPath("temp"), "local-vot", "cache", `${jobId}-orig.mka`);
+}
+
+/** Откуда брать звук оригинала: из сохранённой копии (с её задержкой), если она есть, иначе из самого видео. */
+export function origAudio(job) {
+  const p = origAudioPath(job.id);
+  return existsSync(p) ? { path: p, offset: job.origOffset ?? 0 } : job.file;
 }
 
 /**
@@ -235,22 +291,27 @@ function diskFullError(e) {
 }
 
 /** Облегчённая копия и загрузка её на Диск; заполняет job.diskPath и job.duration. */
-async function uploadCopy(job, work, token, step, signal) {
+async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
   step("light", { state: "active", detail: "Проверяем видео" });
-  const { duration } = await probe(job.file);
+  const { duration, audioCopyable, start, audio } = await probe(job.file);
   job.duration = duration;
-  // облегчённая копия ≈ звук 128 кбит/с + чёрный кадр: ~20 КБ на секунду видео
-  ensureSpace(work, duration * 20_000 + 50 * MB, "для временной облегчённой копии");
+  // облегчённая копия ≈ звук + чёрный кадр: ~20–40 КБ на секунду видео; копия звука оригинала — столько же
+  ensureSpace(work, duration * 80_000 + 50 * MB, "для временной облегчённой копии");
   const light = path.join(work, "light.mp4");
+  const origOut = origAudioPath(job.id);
+  mkdirSync(path.dirname(origOut), { recursive: true });
   try {
-    await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal);
+    await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal,
+      { copyAudio: audioCopyable, origOut, audio, fast: fastAudio });
   } catch (e) {
+    rmSync(origOut, { force: true });
     throw diskFullError(e) ?? e;
   }
   // громкость оригинала меряем по облегчённой копии: в ней тот же звук, а читать её — секунды,
   // в отличие от многогигабайтного исходника; нужна для автоподстройки громкости перевода
   step("light", { detail: "Измеряем громкость" });
   job.origLoudness = await measureLoudness(light, signal);
+  job.origOffset = await audioOffset(job.file, start);
   step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
   step("upload", { state: "active", detail: "Проверяем место на Яндекс Диске" });

@@ -16,7 +16,8 @@ export function getCredentials() {
 
 export const DEFAULT_SETTINGS = {
   outputDir: "",            // пусто — рядом с исходным видео
-  saveVideo: true,          // видео с дорожкой перевода (.mkv)
+  saveVideo: true,          // видео с дорожкой перевода
+  videoFormat: "source",    // source — в формате исходника, если он позволяет (иначе .mkv); mkv — всегда .mkv
   embedSubs: true,          // вшить русские субтитры в видео
   saveAudio: false,         // звуковая дорожка отдельно: оригинал + перевод, как в видео (.m4a)
   saveVoice: false,         // только голос перевода, как его отдал Яндекс (.mp3)
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS = {
   mixMode: "duck",          // duck — приглушать оригинал под переводом; constant — постоянные уровни
   originalVolume: 30,       // громкость оригинала, % (duck — пока звучит перевод; constant — всегда)
   autoLevel: true,          // подстраивать громкость перевода под громкость оригинала
+  fastAudio: false,         // быстрый режим AAC-кодировщика: вдвое быстрее, качество чуть ниже
   deletePermanently: false, // удалять копию с Диска мимо Корзины
 };
 

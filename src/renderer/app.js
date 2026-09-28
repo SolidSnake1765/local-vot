@@ -94,13 +94,26 @@ async function addFiles(paths) {
     startLogin();
     return;
   }
-  const added = await api.addJobs(paths);
+  const { added, note, error } = await api.addJobs(paths);
   for (const job of added) createCard(job);
   updateCount();
+  showAddNote(error || note, Boolean(error));
+}
+
+// итог добавления («пропущено: уже переведены…», «не подходит: …») — на время вместо подсказки
+const ADD_HINT = $("addNote").textContent;
+let addNoteTimer = null;
+function showAddNote(text, isError = false) {
+  clearTimeout(addNoteTimer);
+  $("addNote").textContent = text || ADD_HINT;
+  $("addNote").classList.toggle("added", Boolean(text) && !isError);
+  $("addNote").classList.toggle("add-error", isError);
+  if (text) addNoteTimer = setTimeout(() => showAddNote(""), isError ? 30_000 : 12_000);
 }
 
 const dz = $("dropzone");
 dz.onclick = async () => addFiles(await api.pickVideos());
+$("pickVideoFolder").onclick = async () => addFiles(await api.pickVideoFolder());
 // брошенный мимо зоны файл не должен никуда уходить
 for (const ev of ["dragover", "drop"]) document.addEventListener(ev, (e) => e.preventDefault());
 dz.addEventListener("dragenter", () => dz.classList.add("over"));
@@ -276,7 +289,9 @@ function refreshActions(card) {
     hint.textContent = "Новый перевод с выбранными голосом и языком, прежний файл останется";
   } else {
     btn.textContent = card.state === "done" ? "Перевести заново" : "Попробовать снова";
-    hint.textContent = card.state === "done" ? "Новый запрос к Яндексу — иногда второй перевод выходит лучше" : "";
+    hint.textContent = card.state === "done"
+      ? "Новый запрос к Яндексу — иногда второй перевод выходит лучше. Прежняя версия уйдёт в Корзину"
+      : "";
   }
 }
 
@@ -306,8 +321,10 @@ function updateStep(card, { step, state, progress, detail }) {
   if (state && state !== "active") bar.hidden = true;
 }
 
+/** Все файлы видео (главный процесс присылает полный список: прежняя версия могла уйти в Корзину). */
 function showOutputs(card, outputs) {
   const box = card.node.querySelector(".outputs");
+  box.replaceChildren();
   box.hidden = !outputs.length;
   for (const p of outputs) {
     const row = document.createElement("div");
@@ -342,6 +359,11 @@ function applyUpdate(card, u) {
   if (u.state && !u.step) setState(card, u.state);
   if (u.step) updateStep(card, u);
   if (u.outputs) showOutputs(card, u.outputs);
+  if (u.note !== undefined) {
+    const el = card.node.querySelector(".job-note");
+    el.textContent = u.note;
+    el.hidden = !u.note;
+  }
   if (u.error) {
     const el = card.node.querySelector(".job-error");
     el.textContent = u.error;
@@ -398,6 +420,12 @@ function syncDependent() {
     + " Чтобы применить к готовому видео, нажмите в карточке «Пересобрать видео».";
   const saveVideo = document.querySelector('[data-setting="saveVideo"]').checked;
   document.querySelector('[data-setting="embedSubs"]').disabled = !saveVideo;
+  $("videoFormat").disabled = !saveVideo;
+  $("videoFormatNote").textContent = $("videoFormat").value === "mkv"
+    ? "MKV принимает любое видео, звук и субтитры."
+    : "MP4 останется MP4, AVI — AVI и т. д. Если формат не справится (например, FLV), сохраним в MKV и напишем почему. В AVI, WMV, TS, MPG, OGV субтитры не встраиваются — лягут файлом рядом.";
+  $("saveNone").hidden = ["saveVideo", "saveAudio", "saveVoice", "saveSubs"]
+    .some((k) => document.querySelector(`[data-setting="${k}"]`).checked);
 
   // с живыми голосами язык всегда английский: показываем его, а сохранённый выбор
   // (для видео без живых голосов) возвращаем, когда их выключат
@@ -424,5 +452,6 @@ const info = await api.info();
 STEPS = info.steps;
 LANGS = info.languages;
 LIVELY_LANG = info.livelyLang;
+$("dzFormats").textContent = info.videoExt.map((e) => e.toUpperCase()).join(", ");
 await initSettings();
 await refreshAccount();

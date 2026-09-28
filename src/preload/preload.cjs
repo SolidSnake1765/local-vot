@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("api", {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   setSettings: (patch) => ipcRenderer.invoke("settings:set", patch),
   pickVideos: () => ipcRenderer.invoke("dialog:pickVideos"),
+  pickVideoFolder: () => ipcRenderer.invoke("dialog:pickVideoFolder"),
   pickFolder: () => ipcRenderer.invoke("dialog:pickFolder"),
 
   addJobs: (files) => ipcRenderer.invoke("jobs:add", files),

@@ -76,6 +76,10 @@ select {
 .dz-title { font-size: 16px; font-weight: 600; }
 .dz-sub { color: var(--muted); font-size: 13px; }
 
+.add-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+#addNote.added { color: var(--text); }
+#addNote.add-error { color: var(--err); }
+.dz-formats { font-size: 12px; opacity: .8; }
 .jobs-head { display: flex; align-items: baseline; gap: 10px; }
 .jobs { display: flex; flex-direction: column; gap: 12px; }
 .empty { color: var(--muted); }
@@ -139,12 +143,14 @@ select {
 /* ---------- настройки ---------- */
 .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
 .check.sub { margin-left: 24px; }
+.select.sub { margin: 4px 0 4px 24px; }
 .range, .select { display: block; margin: 8px 0 12px; }
 .range span { display: flex; justify-content: space-between; }
 .folder { display: flex; flex-direction: column; gap: 8px; }
 .folder-path { font-size: 13px; word-break: break-all; }
 .folder-btns { display: flex; gap: 8px; }
 .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.note.warn { color: var(--warn); }
 .note.tight { margin: 2px 0 0 24px; }
 
 /* ---------- окно входа ---------- */
