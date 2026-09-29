@@ -72,6 +72,12 @@
     "electronLanguages": [
       "ru",
       "en-US"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/icon-512.png",
+        "to": "icon.png"
+      }
     ]
   }
 }

@@ -57,6 +57,10 @@ add a video, press "Start", get the translated video.
   Chinese, Korean, Arabic. The app warns you if the language is set wrong.
 - **No censorship** — translates any video.
 - **Queue** — add whole folders, reorder by drag-and-drop, press "Start all". Already translated videos are skipped.
+  Progress counter and overall bar, "Cancel all", "Clear".
+- **Several videos at once** — up to 8: upload and translation run in parallel, while reading videos from disk and
+  saving go one at a time so the disk doesn't slow down.
+- **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.
 - **16 formats**: MP4, MKV, MOV, AVI, WebM, M4V, WMV, FLV, TS, MPG, MPEG, M2TS, MTS, 3GP, VOB, OGV.
   The result is saved in the same format as the source (or always MKV — your choice).
 - **No quality loss** — the picture is copied as is, the audio is saved at no lower quality than the original.
@@ -77,7 +81,8 @@ Download from the [latest release](https://github.com/SolidSnake1765/local-vot/r
 | `Local-VOT-…-portable.zip` | **Portable** — unpack anywhere (even to a USB stick) and run `Local VOT.exe`. All settings and temporary files stay in its own `data` folder; nothing is left in the system. |
 
 **Requirements:** Windows 10 or 11 (64-bit; works on Windows ARM through built-in emulation), internet,
-a Yandex account. A little Disk space is needed — up to ~2 MB per minute of video while it is being processed.
+a Yandex account. A little Disk space is needed — up to ~2 MB per minute of video while the video is in the list
+(if it runs out, the app removes the Disk copies of already finished videos).
 
 > [!NOTE]
 > The app is not signed with a paid certificate, so on first launch Windows may show
@@ -87,7 +92,8 @@ a Yandex account. A little Disk space is needed — up to ~2 MB per minute of vi
 
 1. Press **«Войти через Яндекс»** (Sign in with Yandex), open the Yandex page, enter the code from the app and allow access.
 2. Drag videos (or a whole folder) into the app window.
-3. Choose the video language and voices, reorder the queue and press **«Запустить все»** (Start all).
+3. Choose the video language and voices, reorder the queue and press **«Запустить все»** (Start all)
+   (how many videos to translate at once — in the settings, «Очередь» section).
 4. When the translation is ready, listen to a fragment right in the video card and adjust the volume if you
    like — **«Сохранить с этим звуком»** (Save with this sound) rebuilds the file in seconds.
 

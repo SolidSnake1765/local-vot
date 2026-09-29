@@ -8,10 +8,19 @@ import { getVideoData } from "@vot.js/node/utils/videoData";
 // vot.js не отдаёт наружу поля ответа Яндекса language и isLivelyVoice, а они нужны:
 // language — какой язык Яндекс нашёл в видео (при автоопределении — всегда; при явно указанном
 // языке заполняется, только если речь на него не похожа), isLivelyVoice — вышли ли живые голоса.
-// Перехватываем расшифровку ответа. Задания идут по одному, так что хватает «последнего ответа».
-let lastResponse = {};
+// Перехватываем расшифровку ответа. Видео переводятся параллельно, поэтому ответы храним по номеру
+// перевода (translationId): vot.js возвращает его же в результате — по нему находим свой ответ,
+// а не чужой «последний».
+const responses = new Map();
 const decodeResponse = YandexVOTProtobuf.decodeTranslationResponse;
-YandexVOTProtobuf.decodeTranslationResponse = (buf) => (lastResponse = decodeResponse(buf));
+YandexVOTProtobuf.decodeTranslationResponse = (buf) => {
+  const response = decodeResponse(buf);
+  if (response?.translationId) {
+    responses.set(response.translationId, response);
+    if (responses.size > 100) responses.delete(responses.keys().next().value); // брошенные — не копим
+  }
+  return response;
+};
 
 // status: 1 — готово, 2/3 — ждём, 5 — готова только часть (~10 мин), ждём полный перевод, 0 — отказ
 const FINISHED = 1;
@@ -39,7 +48,6 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
   const client = new VOTClient({ requestLang: lang, responseLang: "ru", apiToken: lively ? token : undefined });
   const extraOpts = { useLivelyVoice: Boolean(lively && token) };
   const videoData = { ...(await getVideoData(url)), duration };
-  lastResponse = {};
 
   let res;
   let errors = 0;
@@ -70,10 +78,12 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
     await sleep(POLL, signal);
   }
 
-  const detectedLang = lastResponse.language || null;
+  const own = responses.get(res.translationId) ?? {};
+  responses.delete(res.translationId);
+  const detectedLang = own.language || null;
   const result = {
     audio: `${base}.ru.mp3`, subs: null, subsCount: 0,
-    detectedLang, lively: Boolean(lastResponse.isLivelyVoice),
+    detectedLang, lively: Boolean(own.isLivelyVoice),
   };
 
   onStatus("Скачиваем перевод");

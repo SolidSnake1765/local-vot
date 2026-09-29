@@ -8,6 +8,35 @@ import { analyzeVoice, audioKbps, audioOffset, makeLight, measureLoudness, mixAu
 import { detectedName, langName, LIVELY_LANG } from "./languages.js";
 import { workRoot } from "./paths.js";
 import { log } from "./log.js";
+import { limiter } from "./limit.js";
+
+// Видео переводятся параллельно, но чтение исходника (облегчённая копия) и запись результата — по одному:
+// иначе диск мечется между многогигабайтными файлами и всё идёт медленнее, чем по очереди.
+const diskTurn = limiter(1);
+
+// Место на Яндекс Диске при нескольких загрузках сразу: свободное место видно только после того, как файл
+// загружен, поэтому уже начатые загрузки «бронируют» свой объём, а проверка идёт по одной (spaceCheck),
+// чтобы два видео не увидели одно и то же свободное место.
+const spaceCheck = limiter(1);
+let reservedOnDisk = 0;
+
+/**
+ * Занять место в очереди на диск сразу при старте видео — в порядке списка. Если занимать его только
+ * после чтения сведений о файле, первым к диску попадает видео, чей файл прочитался быстрее, а не первое
+ * в списке. Возвращает «билет» — промис функции «освободить».
+ */
+export function reserveDiskTurn(signal, priority) {
+  const ticket = diskTurn.acquire(signal, priority);
+  ticket.ready = false;
+  ticket.then(() => { ticket.ready = true; }, () => {});
+  return ticket;
+}
+
+/** Дождаться очереди на диск (по билету или новой); пока ждём — подпись в шаге. Возвращает «освободить». */
+async function waitDiskTurn(step, stepId, signal, ticket = null, priority = Infinity) {
+  if (ticket ? !ticket.ready : diskTurn.busy()) step(stepId, { state: "active", detail: "Ждём очереди: диск занят другим видео" });
+  return ticket ?? diskTurn.acquire(signal, priority);
+}
 
 export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
@@ -41,7 +70,8 @@ const DISK_BYTES_PER_SEC = 130_000; // если сработает ограни�
  * @param emit  ({ step, state?: "active"|"done"|"error", progress?: 0..1, detail?: string }) — ход работы
  * @returns { outputs: string[], lively: boolean, lang: string } — созданные файлы, голос и язык перевода
  */
-export async function runJob(job, { getOptions, token, mode = "translate" }, emit, signal) {
+export async function runJob(job, { getOptions, token, mode = "translate", makeDiskRoom, lightTurn = null, listPosition = () => Infinity },
+  emit, signal) {
   const { file } = job;
   const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
@@ -52,6 +82,7 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
     emit({ step: stepId, ...patch });
   };
 
+  let releaseDisk = null;
   try {
     let result, lively, lang;
     if (mode === "remux") {
@@ -69,13 +100,14 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
         emit({ step: "light", state: "done", detail: "" });
         emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
       } else {
-        await uploadCopy(job, work, token, step, signal, getOptions().fastAudio);
+        await uploadCopy(job, work, token, step, signal, getOptions().fastAudio, makeDiskRoom, lightTurn);
       }
       ({ result, lively, lang } = await translateOnce(job, work, token, step, emit, signal));
       job.translation = await keepTranslation(job, result, lively, lang, signal);
       result = job.translation;
     }
 
+    releaseDisk = await waitDiskTurn(step, "save", signal, null, listPosition);
     step("save", { state: "active", detail: "Проверяем место на диске" });
     // настройки сохранения и звука — на момент сохранения, а не старта: пока видео грузилось
     // и переводилось, их могли поменять
@@ -180,6 +212,7 @@ export async function runJob(job, { getOptions, token, mode = "translate" }, emi
     if (current) emit({ step: current, state: "error", detail: e.message });
     throw e;
   } finally {
+    releaseDisk?.();
     rmSync(work, { recursive: true, force: true });
   }
 }
@@ -296,7 +329,7 @@ function diskFullError(e) {
 }
 
 /** Облегчённая копия и загрузка её на Диск; заполняет job.diskPath и job.duration. */
-async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
+async function uploadCopy(job, work, token, step, signal, fastAudio = false, makeDiskRoom = null, lightTurn = null) {
   step("light", { state: "active", detail: "Проверяем видео" });
   const { duration, audioCopyable, start, audio } = await probe(job.file);
   job.duration = duration;
@@ -307,12 +340,16 @@ async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
   const light = path.join(work, "light.mp4");
   const origOut = origAudioPath(job.id);
   mkdirSync(path.dirname(origOut), { recursive: true });
+  const releaseDisk = await waitDiskTurn(step, "light", signal, lightTurn);
   try {
+    step("light", { state: "active", detail: "0%" });
     await makeLight(job.file, light, duration, (p) => step("light", { progress: p, detail: `${Math.round(p * 100)}%` }), signal,
       { copyAudio: audioCopyable, origOut, audio, fast: fastAudio });
   } catch (e) {
     rmSync(origOut, { force: true });
     throw diskFullError(e) ?? e;
+  } finally {
+    releaseDisk(); // исходник прочитан — диск свободен для следующего видео
   }
   // громкость оригинала меряем по облегчённой копии: в ней тот же звук, а читать её — секунды,
   // в отличие от многогигабайтного исходника; нужна для автоподстройки громкости перевода
@@ -323,10 +360,25 @@ async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
 
   step("upload", { state: "active", detail: "Проверяем место на Яндекс Диске" });
   const lightSize = statSync(light).size;
-  const diskFree = await disk.freeSpace(token, signal).catch(() => Infinity);
-  if (diskFree < lightSize + 10 * MB) {
-    throw new Error(`На Яндекс Диске не хватает места: нужно ~${size(lightSize)}, свободно ${size(diskFree)}. `
-      + "Освободите место на Диске (и очистите его Корзину) и нажмите «Попробовать снова».");
+  const need = lightSize + 10 * MB;
+  const releaseCheck = await spaceCheck.acquire(signal);
+  try {
+    const available = async () => (await disk.freeSpace(token, signal).catch(() => Infinity)) - reservedOnDisk;
+    let free = await available();
+    // не хватает — убираем копии видео, которые сейчас не переводятся (нужны только для «Перевести заново»)
+    if (free < need && makeDiskRoom && (await makeDiskRoom()) > 0) {
+      step("upload", { detail: "Освободили место: убрали с Диска копии готовых видео" });
+      free = await available();
+    }
+    if (free < need) {
+      throw new Error(`На Яндекс Диске не хватает места: нужно ~${size(need)}, свободно ${size(Math.max(0, free))}`
+        + (reservedOnDisk ? ` (ещё ${size(reservedOnDisk)} сейчас загружают другие видео)` : "") + ". "
+        + "Освободите место на Диске (и очистите его Корзину) или уменьшите «Одновременно переводить» "
+        + "и нажмите «Попробовать снова».");
+    }
+    reservedOnDisk += lightSize; // до конца загрузки это место занято нами
+  } finally {
+    releaseCheck();
   }
   // Обычно загрузка идёт на полной скорости (см. UPLOAD_LINK_HEADERS в yadisk.js) — показываем
   // отправленные байты и скорость. Если Яндекс всё же ограничит скорость (~127 КБ/с), байты уйдут
@@ -355,6 +407,7 @@ async function uploadCopy(job, work, token, step, signal, fastAudio = false) {
     }, signal);
   } finally {
     clearInterval(timer);
+    reservedOnDisk -= lightSize; // загружено (или не вышло) — теперь это видно в свободном месте Диска
   }
   step("upload", { state: "done", detail: `${size(lightSize)} за ${fmtSec(Math.round((Date.now() - t0) / 1000))}` });
 }

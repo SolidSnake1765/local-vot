@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld("api", {
   setJobSound: (id, patch) => ipcRenderer.invoke("jobs:setSound", id, patch),
   preview: (id, start) => ipcRenderer.invoke("jobs:preview", id, start),
   removeJob: (id) => ipcRenderer.invoke("jobs:remove", id),
+  clearInfo: () => ipcRenderer.invoke("jobs:clearInfo"),
+  clearJobs: (mode) => ipcRenderer.invoke("jobs:clear", mode),
+  cancelAll: () => ipcRenderer.invoke("jobs:cancelAll"),
+  testNotification: () => ipcRenderer.invoke("app:testNotification"),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
 
   // путь к файлу, брошенному в окно (с Electron 32 File.path больше нет)

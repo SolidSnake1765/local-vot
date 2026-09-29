@@ -1,5 +1,5 @@
 // Главный процесс: окно, вход в Яндекс, очередь заданий перевода.
-import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,12 +7,13 @@ import * as auth from "./auth.js";
 import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { describeMix, origAudio, origAudioPath, runJob, STEPS, translationCacheDir } from "./pipeline.js";
+import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir } from "./pipeline.js";
 import { renderPreview, setTempDir } from "./media.js";
 import { isPortable, setupDataPaths, workRoot } from "./paths.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 import { hide, hideVideo, initLog, log, logDir } from "./log.js";
 import os from "node:os";
+import { execFileSync } from "node:child_process";
 
 // портативная версия — все данные в папке data рядом с программой (до готовности приложения)
 setupDataPaths();
@@ -32,7 +33,7 @@ const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts"
 let win = null;
 const send = (channel, payload) => win?.webContents.send(channel, payload);
 
-// ---------- очередь: задания выполняются по одному ----------
+// ---------- очередь: до parallelJobs видео одновременно, работа с диском — по одному (см. pipeline.js) ----------
 // job: { id, file, name, state, controller, lively, lang, diskPath, duration, voiceUsed, langUsed, outputs, replace }
 // outputs — файлы, сохранённые для этого видео; replace — новая версия заменяет их (прежние — в Корзину)
 // diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
@@ -41,8 +42,10 @@ const queue = [];
 let jobCounter = 0; // номер видео в журнале: «видео #3» вместо имени файла
 // порядок карточек в списке (id сверху вниз): очередь выполняется в этом порядке, его меняют перетаскиванием
 let order = [];
-let running = false;
-let currentRun = null; // промис текущего задания — при выходе ждём, пока оно закроет ссылку
+// видео, которые переводятся прямо сейчас: id → промис (при выходе ждём, пока они закроют ссылки)
+const running = new Map();
+// итог текущей «пачки» — для уведомления, когда очередь закончится
+let batch = { done: 0, failed: 0 };
 
 function publicJob(j) {
   return { id: j.id, file: j.file, name: j.name, state: j.state, lively: j.lively, lang: j.lang,
@@ -69,11 +72,28 @@ function sortQueue() {
 /** Видео ни разу не запускалось (нет ни перевода, ни копии на Диске, ни файлов) — можно вернуть в «ожидает». */
 const neverRan = (job) => !job.translation && !job.diskPath && !job.outputs?.length;
 
-async function pump() {
-  if (running) return;
-  const job = queue.shift();
-  if (!job) return;
-  running = true;
+/** Сколько видео переводить одновременно (настройка «Одновременно переводить»). */
+const parallelLimit = () => Math.min(8, Math.max(1, Number(loadSettings().parallelJobs) || 1));
+
+/**
+ * Запускает видео из очереди, пока есть свободные места. Загрузка и перевод идут параллельно;
+ * чтение исходника и сохранение pipeline сам пускает по одному (очередь на диск).
+ */
+function pump() {
+  while (running.size < parallelLimit() && queue.length) {
+    const job = queue.shift();
+    running.set(job.id, runOne(job));
+  }
+}
+
+async function runOne(job) {
+  // место в очереди на диск (облегчённая копия) — сразу, до любого ожидания: так видео идут к диску
+  // в порядке списка. Пересборке и видео, чья копия уже на Диске, облегчённая копия не нужна
+  // место в списке — приоритет у диска: из ожидающих первым идёт видео выше по списку (учитывает и
+  // перетаскивание, пока ждёт); видео уже убрали из списка — в самый конец
+  const listPosition = () => { const i = order.indexOf(job.id); return i < 0 ? Infinity : i; };
+  const lightTurn = job.mode === "remux" || job.diskPath ? null : reserveDiskTurn(job.controller.signal, listPosition);
+  lightTurn?.catch(() => {}); // отмена в ожидании — не ошибка
   job.state = "running";
   send("job:update", { id: job.id, state: "running" });
   const scope = `видео #${job.no}`;
@@ -90,11 +110,11 @@ async function pump() {
       soundUsed = pickSound(options);
       return options;
     };
-    currentRun = runJob(job, { getOptions, token, mode: job.mode }, (patch) => {
+    const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
       send("job:update", { id: job.id, ...patch });
     }, job.controller.signal);
-    const { outputs, lively, lang } = await currentRun;
+    const { outputs, lively, lang } = await run;
     const { files, stuck } = await replaceOutputs(job.replace ? (job.outputs ?? []) : [], outputs);
     job.outputs = [...(job.replace ? [] : job.outputs ?? []), ...files];
     // звук, с которым собраны файлы, закрепляется за видео: дальше его меняют только в карточке
@@ -105,24 +125,117 @@ async function pump() {
     job.langUsed = lang;
     log.info(scope, `готово за ${Math.round((Date.now() - t0) / 1000)} с: ${files.map((p) => path.extname(p)).join(", ")}`
       + (stuck ? `; прежнюю версию убрать не удалось (файлов: ${stuck})` : ""), soundUsed);
+    batch.done++;
+    notify(`Готово: ${job.name}`, `Сохранено: ${files.map((p) => path.extname(p).slice(1).toUpperCase()).join(", ")}`);
     send("job:update", { id: job.id, state: "done", outputs: job.outputs, voiceUsed: lively, langUsed: lang,
       hasTranslation: true, preview: previewInfo(job),
       note: stuck ? `Прежнюю версию убрать не удалось (файлов: ${stuck}) — возможно, она открыта в плеере. Новая сохранена рядом.` : "" });
   } catch (e) {
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
     if (job.state === "cancelled") log.info(scope, `отменено через ${Math.round((Date.now() - t0) / 1000)} с`);
-    else log.error(scope, e);
+    else {
+      log.error(scope, e);
+      batch.failed++;
+      notify(`Ошибка: ${job.name}`, e.message);
+    }
     // перевод получен, а сохранить не вышло — звук для карточки всё равно закрепляем (от настроек по умолчанию)
     if (job.translation && !job.sound) job.sound = pickSound(loadSettings());
     send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
       hasTranslation: Boolean(job.translation), preview: previewInfo(job) });
   } finally {
+    lightTurn?.then((release) => release(), () => {}); // не дошли до копии (ошибка, отмена) — место отдаём
     job.mode = "translate";
-    running = false;
-    currentRun = null;
+    running.delete(job.id);
     pump();
+    // очередь закончилась — одно общее уведомление, если видео было больше одного
+    if (!running.size && !queue.length) {
+      const { done, failed } = batch;
+      batch = { done: 0, failed: 0 };
+      if (done + failed > 1) {
+        notify("Очередь переведена", `Готово: ${done}${failed ? ` · с ошибкой: ${failed}` : ""}`);
+      }
+    }
   }
 }
+
+/**
+ * На Яндекс Диске не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
+ * (готовые, с ошибкой, отменённые): они нужны только для «Перевести заново» без повторной загрузки.
+ * Если такое видео переведут заново, копия просто загрузится ещё раз. Возвращает, сколько копий убрано.
+ */
+async function makeDiskRoom() {
+  let removed = 0;
+  for (const job of jobs.values()) {
+    if (!job.diskPath || ["queued", "running"].includes(job.state)) continue;
+    // мимо Корзины: в Корзине копия продолжала бы занимать место. Это временная копия программы
+    // (чёрный кадр + звук), не файл пользователя
+    await removeDiskCopy(job, { permanently: true });
+    removed++;
+  }
+  if (removed) log.info("Диск", `не хватало места — убраны копии готовых видео: ${removed}`);
+  return removed;
+}
+
+// ---------- уведомления Windows ----------
+// Имя программы для Windows (AppUserModelID). У установленной оно же стоит на ярлыке в «Пуске».
+const AUMID = app.isPackaged ? "io.github.solidsnake1765.localvot" : "io.github.solidsnake1765.localvot.dev";
+let aumidRegistered = false;
+
+/**
+ * Windows показывает уведомления только «знакомым» программам. У запуска из исходников и у портативной
+ * версии нет ярлыка в «Пуске», поэтому регистрируем имя и значок в реестре пользователя
+ * (HKCU\Software\Classes\AppUserModelId\<AUMID>) — официальный способ для программ без ярлыка.
+ * Делается при первом уведомлении (выключены — в реестр ничего не пишем); деинсталлятор ключ убирает.
+ */
+function registerAumid() {
+  if (aumidRegistered || process.platform !== "win32") return;
+  aumidRegistered = true;
+  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${AUMID}`;
+  const icon = app.isPackaged ? path.join(process.resourcesPath, "icon.png") : path.join(ROOT, "assets", "icon-512.png");
+  const name = app.isPackaged ? "Local VOT" : "Local VOT (разработка)";
+  try {
+    for (const [value, data] of [["DisplayName", name], ["IconUri", icon]]) {
+      execFileSync("reg", ["add", key, "/v", value, "/t", "REG_SZ", "/d", data, "/f"], { windowsHide: true, stdio: "ignore" });
+    }
+  } catch (e) {
+    log.warn("уведомления", "не удалось зарегистрировать программу в Windows", e);
+  }
+}
+
+/**
+ * Уведомление — только если окно не на переднем плане (иначе и так всё видно) и не выключено в
+ * настройках (force — кнопка «Проверить»). Плюс мигание значка на панели задач, пока окно не откроют.
+ */
+function notify(title, body, { force = false } = {}) {
+  if (!win) return false;
+  if (!force && !loadSettings().notifications) return false;
+  if (!force && win.isFocused()) {
+    log.info("уведомления", "не показано: окно на переднем плане");
+    return false;
+  }
+  if (!force) win.flashFrame(true);
+  if (!Notification.isSupported()) {
+    log.warn("уведомления", "Windows сообщает, что уведомления не поддерживаются");
+    return false;
+  }
+  registerAumid();
+  const n = new Notification({ title, body: String(body ?? "").slice(0, 200), icon: path.join(ROOT, "assets", "icon-512.png") });
+  shownNotifications.add(n); // держим ссылку, иначе уведомление может пропасть раньше, чем по нему нажмут
+  const forget = () => shownNotifications.delete(n);
+  n.on("click", () => {
+    forget();
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  n.on("close", forget);
+  n.on("failed", (_e, error) => { forget(); log.warn("уведомления", "Windows не показала уведомление", error); });
+  n.on("show", () => log.info("уведомления", "показано"));
+  n.show();
+  return true;
+}
+const shownNotifications = new Set();
 
 const isVideo = (file) => VIDEO_EXT.includes(path.extname(file).slice(1).toLowerCase());
 // наши же результаты: «имя [RU].mkv», «имя [RU живые] (2).mkv» — их переводить не надо
@@ -320,7 +433,8 @@ function removeTranslationCache(job) {
   rmSync(origAudioPath(job.id), { force: true });
 }
 
-async function removeDiskCopy(job) {
+/** permanently — мимо Корзины Диска независимо от настройки (Корзина тоже занимает место на Диске). */
+async function removeDiskCopy(job, { permanently = null } = {}) {
   if (!job.diskPath) return;
   const diskPath = job.diskPath;
   job.diskPath = null;
@@ -328,16 +442,16 @@ async function removeDiskCopy(job) {
   if (!token) return;
   const { deletePermanently } = loadSettings();
   await disk.unpublish(token, diskPath).catch(() => {});
-  await disk.remove(token, diskPath, { permanently: deletePermanently }).catch(() => {});
+  await disk.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
 }
 
-/** Останавливает всё, ждёт текущее задание (не дольше 20 с) и убирает копии с Диска. */
+/** Останавливает всё, ждёт идущие задания (не дольше 20 с) и убирает копии с Диска. */
 async function shutdown() {
-  log.info("выход", `закрытие программы; видео в списке: ${jobs.size}${running ? ", идёт перевод — прерываем" : ""}`);
+  log.info("выход", `закрытие программы; видео в списке: ${jobs.size}${running.size ? `, идёт перевод: ${running.size} — прерываем` : ""}`);
   queue.length = 0;
   for (const j of jobs.values()) j.controller.abort();
-  if (currentRun) {
-    await Promise.race([currentRun.catch(() => {}), new Promise((r) => setTimeout(r, 20_000))]);
+  if (running.size) {
+    await Promise.race([Promise.all(running.values()), new Promise((r) => setTimeout(r, 20_000))]);
   }
   await Promise.race([
     Promise.all([...jobs.values()].map(removeDiskCopy)),
@@ -417,7 +531,9 @@ ipcMain.handle("app:openRepo", () => { if (REPO_URL) shell.openExternal(REPO_URL
 ipcMain.handle("settings:get", () => loadSettings());
 ipcMain.handle("settings:set", (_e, patch) => {
   if (patch?.outputDir) hide(patch.outputDir, "<папка сохранения>");
-  return saveSettings(patch);
+  const next = saveSettings(patch);
+  if (patch && "parallelJobs" in patch) pump();
+  return next;
 });
 // ошибки окна (интерфейса) — в тот же журнал
 ipcMain.handle("log:renderer", (_e, message) => log.error("окно", String(message).slice(0, 4000)));
@@ -441,19 +557,29 @@ ipcMain.handle("dialog:pickFolder", async () => {
 });
 
 ipcMain.handle("jobs:add", (_e, files) => addJobs(files));
-ipcMain.handle("jobs:cancel", (_e, id) => {
-  const job = jobs.get(id);
-  if (!job) return;
-  log.info(`видео #${job.no}`, "отмена по кнопке");
+function cancelJob(job, why) {
+  log.info(`видео #${job.no}`, why);
   job.controller.abort();
   const i = queue.indexOf(job);
   if (i >= 0) {
     queue.splice(i, 1);
     // ещё не начатое видео снова просто ждёт «Старт»; начатое раньше — «Отменено» со своими кнопками
     job.state = neverRan(job) ? "idle" : "cancelled";
-    send("job:update", { id, state: job.state, reset: job.state === "idle" });
+    send("job:update", { id: job.id, state: job.state, reset: job.state === "idle" });
   }
+}
+ipcMain.handle("jobs:cancel", (_e, id) => {
+  const job = jobs.get(id);
+  if (job) cancelJob(job, "отмена по кнопке");
 });
+// «Отменить все»: сначала очередь (иначе освободившиеся места тут же займут следующие видео), потом идущие
+ipcMain.handle("jobs:cancelAll", () => {
+  const all = [...jobs.values()];
+  for (const job of all.filter((j) => j.state === "queued")) cancelJob(job, "отменить все");
+  for (const job of all.filter((j) => j.state === "running")) cancelJob(job, "отменить все");
+});
+ipcMain.handle("app:testNotification", () =>
+  notify("Local VOT", "Уведомления работают: так придёт сообщение о готовом видео.", { force: true }));
 // «Старт» у видео, которое ждёт запуска
 ipcMain.handle("jobs:start", (_e, id) => {
   const job = jobs.get(id);
@@ -496,14 +622,37 @@ ipcMain.handle("jobs:remux", (_e, id) => {
   if (!job?.translation || !["done", "error", "cancelled"].includes(job.state)) return;
   enqueue(job, "remux", true);
 });
+/** Убрать видео из списка: вместе с сохранённым переводом и копией на Диске (файлы на компьютере остаются). */
+function dropJob(job) {
+  const i = queue.indexOf(job);
+  if (i >= 0) queue.splice(i, 1);
+  jobs.delete(job.id);
+  order = order.filter((x) => x !== job.id);
+  removeTranslationCache(job);
+  removeDiskCopy(job);
+}
+
 ipcMain.handle("jobs:remove", async (_e, id) => {
   const job = jobs.get(id);
   if (!job || ["queued", "running"].includes(job.state)) return false;
-  jobs.delete(id);
-  order = order.filter((x) => x !== id);
-  removeTranslationCache(job);
-  removeDiskCopy(job);
+  dropJob(job);
   return true;
+});
+// «Очистить список»: сколько видео можно убрать (для вопроса в окне программы)
+ipcMain.handle("jobs:clearInfo", () => {
+  const removable = [...jobs.values()].filter((j) => j.state !== "running");
+  return { all: removable.length, done: removable.filter((j) => j.state === "done").length, running: running.size };
+});
+// mode: "all" — все, кроме идущих прямо сейчас; "done" — только готовые. Возвращает id убранных видео.
+ipcMain.handle("jobs:clear", (_e, mode) => {
+  const removable = [...jobs.values()].filter((j) => j.state !== "running");
+  const targets = mode === "done" ? removable.filter((j) => j.state === "done") : removable;
+  for (const job of targets) {
+    job.controller.abort(); // видео в очереди — больше не запустится
+    dropJob(job);
+  }
+  log.info("очередь", `очищено видео: ${targets.length}`);
+  return targets.map((j) => j.id);
 });
 ipcMain.handle("shell:showItem", (_e, p) => shell.showItemInFolder(p));
 
@@ -558,9 +707,9 @@ function createWindow() {
   let closing = false;
   win.on("close", async (e) => {
     const hasCopies = [...jobs.values()].some((j) => j.diskPath);
-    if (closing || (!running && queue.length === 0 && !hasCopies)) return;
+    if (closing || (!running.size && queue.length === 0 && !hasCopies)) return;
     e.preventDefault();
-    if (running || queue.length) {
+    if (running.size || queue.length) {
       const { response } = await dialog.showMessageBox(win, {
         type: "question",
         buttons: ["Закрыть", "Продолжить перевод"],
@@ -577,9 +726,11 @@ function createWindow() {
     await shutdown();
     win.close();
   });
+  win.on("focus", () => win.flashFrame(false)); // уведомление увидели — значок больше не мигает
   win.on("closed", () => { win = null; });
 }
 
+if (process.platform === "win32") app.setAppUserModelId(AUMID);
 app.whenReady().then(() => {
   log.info("запуск", `Local VOT ${app.getVersion()} (${isPortable() ? "портативная" : app.isPackaged ? "установленная" : "разработка"}), `
     + `Windows ${os.release()} ${process.arch}, Electron ${process.versions.electron}, ffmpeg встроенный`);

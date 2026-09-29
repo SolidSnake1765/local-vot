@@ -183,9 +183,6 @@ option { background: var(--surface); }
 #addNote.added { color: var(--text); }
 #addNote.add-error { color: var(--err); }
 .jobs-head { display: flex; align-items: center; gap: 10px; }
-.jobs-head #jobsCount:not(:empty) {
-  font-size: 12px; padding: 1px 9px; border-radius: 99px; background: var(--surface-2); color: var(--muted);
-}
 .jobs { display: flex; flex-direction: column; gap: 14px; }
 .empty {
   color: var(--muted); text-align: center; padding: 28px 16px; border-radius: var(--radius);
@@ -360,7 +357,6 @@ option { background: var(--surface); }
 }
 
 /* ---------- порядок очереди ---------- */
-.jobs-head .start-all { margin-left: auto; }
 /* ручка из шести точек слева от названия */
 .drag-handle {
   flex-shrink: 0; width: 12px; height: 18px; margin-left: -4px; border-radius: 3px; cursor: grab; opacity: .45;
@@ -417,3 +413,58 @@ option { background: var(--surface); }
 }
 .link-btn:hover { color: var(--text); }
 .link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* только что добавленные видео — короткая подсветка */
+.job.fresh { animation: fresh 1.8s ease-out; }
+@keyframes fresh {
+  0%, 35% { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(126, 224, 255, .25), 0 10px 30px -18px rgba(0, 0, 0, .8); }
+}
+
+/* ---------- шапка очереди: счётчик, кнопки, полоса готовности ---------- */
+.jobs-head { flex-wrap: wrap; row-gap: 8px; }
+.queue-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.qs-main { padding: 2px 10px; border-radius: 99px; background: var(--surface-2); color: var(--muted); }
+.qs-main b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.qs-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); }
+.qs-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.qs-chip.run { color: var(--accent); background: rgba(126, 224, 255, .1); }
+.qs-chip.run::before { animation: pulse 1.2s ease-in-out infinite; }
+.qs-chip.wait { color: #b9a6ff; background: rgba(159, 123, 255, .1); }
+.qs-chip.idle { color: var(--warn); background: rgba(255, 196, 102, .09); }
+.qs-chip.err { color: var(--err); background: rgba(255, 122, 138, .1); }
+.queue-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.jobs-head .start-all, .jobs-head .queue-actions .start-all { margin-left: 0; }
+.queue-progress { display: flex; align-items: center; gap: 10px; margin: 2px 0 14px; }
+.qp-track {
+  flex: 1; display: flex; height: 10px; border-radius: 99px; overflow: hidden;
+  background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+.qp-seg { display: block; height: 100%; width: 0; transition: width .5s ease; }
+.qp-seg.done { background: linear-gradient(90deg, #3fbf82, var(--ok)); box-shadow: 0 0 12px rgba(95, 211, 154, .45); }
+.qp-seg.run {
+  background: linear-gradient(90deg, var(--accent), var(--accent-3), var(--accent)); background-size: 200% 100%;
+  animation: flow 1.8s linear infinite; opacity: .85;
+}
+.qp-seg.err { background: var(--err); }
+.qp-pct { min-width: 38px; text-align: right; font-size: 13px; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums; }
+
+/* тихие кнопки в шапке: иконка + текст, без рамки, заметнее при наведении */
+.btn-quiet {
+  display: inline-flex; align-items: center; gap: 6px; background: transparent; border-color: transparent;
+  color: var(--muted); font-weight: 500;
+}
+.btn-quiet svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.btn-quiet:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); filter: none; box-shadow: none; }
+.btn-quiet.danger:hover { color: var(--err); border-color: rgba(255, 122, 138, .35); background: rgba(255, 122, 138, .08); }
+.btn-danger { background: linear-gradient(135deg, #c2415a, #e0627a); }
+.btn-danger:hover { box-shadow: 0 6px 18px -6px rgba(224, 98, 122, .7); }
+
+/* окно-вопрос */
+.ask-card { text-align: left; width: min(460px, 92vw); }
+.ask-card h2 { justify-content: flex-start; font-size: 17px; margin-bottom: 6px; }
+.ask-text { color: var(--muted); margin: 0 0 18px; line-height: 1.5; }
+.ask-btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+
+/* галочка с кнопкой справа (уведомления → «Проверить») */
+.check-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.link-btn.inline { display: inline; margin: 0; font-size: 12px; }

@@ -43,8 +43,22 @@
 
       <div class="jobs-head">
         <h2>Очередь</h2>
-        <span class="muted" id="jobsCount"></span>
-        <button class="btn btn-small start-all" id="startAll" type="button" hidden>▶ Запустить все</button>
+        <div class="queue-stats" id="queueStats" hidden></div>
+        <div class="queue-actions">
+          <button class="btn btn-small btn-quiet" id="clearList" type="button" title="Убрать видео из списка (файлы на компьютере остаются)" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4M2.5 4h11M4 4l.7 9.1a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4M6.5 7v4M9.5 7v4"/></svg>
+            Очистить
+          </button>
+          <button class="btn btn-small btn-quiet danger" id="cancelAll" type="button" title="Остановить все переводы и очередь" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+            Отменить все
+          </button>
+          <button class="btn btn-small start-all" id="startAll" type="button" hidden>▶ Запустить все</button>
+        </div>
+      </div>
+      <div class="queue-progress" id="queueProgress" hidden>
+        <div class="qp-track"><i class="qp-seg done"></i><i class="qp-seg run"></i><i class="qp-seg err"></i></div>
+        <span class="qp-pct" id="queuePct"></span>
       </div>
       <div class="jobs" id="jobs">
         <p class="empty" id="emptyHint">Пока пусто. Добавьте видео, расставьте порядок и нажмите «Запустить все».</p>
@@ -89,6 +103,18 @@
       </label>
       <p class="note">У каждого видео в очереди — свои голос и язык, их можно поменять в карточке.</p>
 
+      <h2>Очередь</h2>
+      <label class="select">
+        <span>Одновременно переводить</span>
+        <select data-setting="parallelJobs" data-type="number" id="parallelJobs"></select>
+      </label>
+      <p class="note tight">Загрузка и перевод идут параллельно, а чтение видео с диска и сохранение — по одному, чтобы диск не тормозил.</p>
+      <div class="check-row">
+        <label class="check"><input type="checkbox" data-setting="notifications"> Уведомления Windows</label>
+        <button class="link-btn inline" id="testNotification" type="button" title="Показать тестовое уведомление прямо сейчас">Проверить</button>
+      </div>
+      <p class="note tight">Когда видео или вся очередь готовы, если окно программы свёрнуто или за другими окнами.</p>
+
       <h2>Звук по умолчанию</h2>
       <p class="note top">Для новых видео. Звук готового видео настраивается в его карточке — рядом с прослушиванием.</p>
       <label class="select">
@@ -121,6 +147,15 @@
       </footer>
     </aside>
   </main>
+
+  <!-- вопрос с вариантами ответа (очистить список, отменить все) — в оформлении программы -->
+  <div class="modal" id="askModal" hidden>
+    <div class="modal-card ask-card" role="dialog" aria-modal="true" aria-labelledby="askTitle">
+      <h2 id="askTitle"></h2>
+      <p class="ask-text" id="askText"></p>
+      <div class="ask-btns" id="askBtns"></div>
+    </div>
+  </div>
 
   <div class="modal" id="loginModal" hidden>
     <div class="modal-card">

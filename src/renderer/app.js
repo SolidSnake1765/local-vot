@@ -110,6 +110,13 @@ async function addFiles(paths) {
   for (const job of added) createCard(job);
   updateCount();
   showAddNote(error || note, Boolean(error));
+  // новые видео встают в конец списка — показываем их, чтобы не искать
+  const fresh = added.map((j) => cards.get(j.id)?.node).filter(Boolean);
+  fresh[0]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  for (const node of fresh) {
+    node.classList.add("fresh");
+    setTimeout(() => node.classList.remove("fresh"), 1800);
+  }
 }
 
 // итог добавления («пропущено: уже переведены…», «не подходит: …») — на время вместо подсказки
@@ -245,13 +252,7 @@ function createCard(job) {
   }
   node.querySelector(".snd-save").onclick = () => api.remux(job.id);
   const remove = async () => {
-    if (await api.removeJob(job.id)) {
-      if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
-      node.remove();
-      cards.delete(job.id);
-      $("emptyHint").hidden = cards.size > 0;
-      updateCount();
-    }
+    if (await api.removeJob(job.id)) dropCard(card);
   };
   node.querySelector(".job-remove").onclick = remove;
   node.querySelector(".job-drop").onclick = remove;
@@ -438,14 +439,128 @@ function applyUpdate(card, u) {
   updateCount();
 }
 
+/** Шапка очереди: сколько видео и в каком они состоянии, полоса готовности, какие кнопки нужны. */
 function updateCount() {
-  const n = cards.size;
-  $("jobsCount").textContent = n ? `${n} видео` : "";
-  const idle = [...cards.values()].filter((c) => c.state === "idle").length;
+  const list = [...cards.values()];
+  const count = (...states) => list.filter((c) => states.includes(c.state)).length;
+  const total = list.length;
+  const done = count("done");
+  const parts = [
+    ["run", count("running"), "в работе"],
+    ["wait", count("queued"), "в очереди"],
+    ["idle", count("idle"), "ждут запуска"],
+    ["err", count("error"), "с ошибкой"],
+    ["off", count("cancelled"), "отменено"],
+  ].filter(([, n]) => n > 0);
+  const stats = $("queueStats");
+  stats.hidden = total === 0;
+  stats.replaceChildren();
+  const main = document.createElement("span");
+  main.className = "qs-main";
+  main.innerHTML = `<b></b> из <b></b> готово`;
+  main.children[0].textContent = done;
+  main.children[1].textContent = total;
+  stats.append(main);
+  for (const [kind, n, label] of parts) {
+    const chip = document.createElement("span");
+    chip.className = `qs-chip ${kind}`;
+    chip.textContent = `${n} ${label}`;
+    stats.append(chip);
+  }
+  // полоса: готово (зелёный) · в работе (переливается) · с ошибкой (красный); остальное — ещё впереди
+  const bar = $("queueProgress");
+  bar.hidden = total === 0;
+  const width = (n) => `${total ? (n / total) * 100 : 0}%`;
+  bar.querySelector(".qp-seg.done").style.width = width(done);
+  bar.querySelector(".qp-seg.run").style.width = width(count("running"));
+  bar.querySelector(".qp-seg.err").style.width = width(count("error"));
+  $("queuePct").textContent = `${total ? Math.round((done / total) * 100) : 0}%`;
+
+  const idle = count("idle");
   $("startAll").hidden = idle === 0;
   $("startAll").textContent = idle > 1 ? `▶ Запустить все (${idle})` : "▶ Запустить";
+  $("cancelAll").hidden = count("queued", "running") === 0;
+  $("clearList").hidden = !list.some((c) => c.state !== "running");
 }
 $("startAll").onclick = () => api.startAll();
+$("clearList").onclick = async () => {
+  const info = await api.clearInfo();
+  if (!info.all) return;
+  const buttons = [{ label: `Убрать все (${info.all})`, value: "all", kind: "danger" }];
+  if (info.done && info.done < info.all) buttons.push({ label: `Только готовые (${info.done})`, value: "done", kind: "primary" });
+  buttons.push({ label: "Отмена", value: null, kind: "ghost" });
+  const mode = await askUser({
+    title: "Очистить список?",
+    text: (info.running ? "Видео, которые переводятся прямо сейчас, останутся. " : "")
+      + "Файлы на компьютере не удаляются. Копии этих видео на Яндекс Диске и полученные переводы удалятся — "
+      + "«Пересобрать видео» для них будет недоступно.",
+    buttons,
+  });
+  if (!mode) return;
+  for (const id of await api.clearJobs(mode)) {
+    const card = cards.get(id);
+    if (card) dropCard(card);
+  }
+};
+$("cancelAll").onclick = async () => {
+  const list = [...cards.values()];
+  const runningNow = list.filter((c) => c.state === "running").length;
+  const waiting = list.filter((c) => c.state === "queued").length;
+  const ok = await askUser({
+    title: "Отменить все переводы?",
+    text: [runningNow ? `Переводятся сейчас: ${runningNow}.` : "", waiting ? `В очереди: ${waiting}.` : "",
+      "Видео останутся в списке — их можно будет запустить снова. Уже сохранённые файлы не пострадают."]
+      .filter(Boolean).join(" "),
+    buttons: [{ label: "Отменить все", value: true, kind: "danger" }, { label: "Не отменять", value: null, kind: "ghost" }],
+  });
+  if (ok) api.cancelAll();
+};
+$("testNotification").onclick = async () => {
+  const shown = await api.testNotification();
+  if (!shown) showAddNote("Windows не показала уведомление — подробности в журнале («Папка логов»)", true);
+};
+
+/**
+ * Вопрос с вариантами ответа в оформлении программы (вместо системного окна Windows).
+ * buttons: [{ label, value, kind: "danger" | "primary" | "ghost" }]; Esc и клик мимо — null.
+ */
+function askUser({ title, text, buttons }) {
+  const modal = $("askModal");
+  $("askTitle").textContent = title;
+  $("askText").textContent = text;
+  const box = $("askBtns");
+  box.replaceChildren();
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      document.removeEventListener("keydown", onKey);
+      modal.onclick = null;
+      resolve(value);
+    };
+    const onKey = (e) => { if (e.key === "Escape") finish(null); };
+    for (const b of buttons) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `btn ${b.kind === "ghost" ? "btn-ghost" : b.kind === "danger" ? "btn-danger" : ""}`;
+      btn.textContent = b.label;
+      btn.onclick = () => finish(b.value);
+      box.append(btn);
+    }
+    modal.onclick = (e) => { if (e.target === modal) finish(null); };
+    document.addEventListener("keydown", onKey);
+    modal.hidden = false;
+    box.lastElementChild?.focus(); // по умолчанию — безопасный вариант (последний: «Отмена»)
+  });
+}
+
+/** Карточку — из списка (видео уже убрано в главном процессе). */
+function dropCard(card) {
+  if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
+  card.node.remove();
+  cards.delete(card.id);
+  $("emptyHint").hidden = cards.size > 0;
+  updateCount();
+}
 
 // ---------- порядок очереди: карточки перетаскиваются за ручку слева от названия ----------
 let dragged = null;
@@ -486,6 +601,12 @@ function renderFolder(dir) {
 
 async function initSettings() {
   fillLangSelect($("settingsLang"));
+  for (const n of [1, 2, 3, 4, 5, 6, 8]) {
+    const opt = document.createElement("option");
+    opt.value = String(n);
+    opt.textContent = n === 1 ? "1 видео — по очереди" : `${n} видео`;
+    $("parallelJobs").append(opt);
+  }
   for (let v = 0; v <= 100; v += 10) {
     const opt = document.createElement("option");
     opt.value = String(v);

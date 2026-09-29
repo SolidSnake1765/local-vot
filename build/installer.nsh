@@ -5,4 +5,8 @@
   RMDir /r "$TEMP\local-vot"
   ; копия установщика, которую electron-builder сохраняет для будущих обновлений (~120 МБ)
   RMDir /r "$LOCALAPPDATA\local-vot-updater"
+  ; уведомления Windows: имя и значок программы, которые она регистрирует, и настройки уведомлений,
+  ; которые Windows заводит для неё сама
+  DeleteRegKey HKCU "Software\Classes\AppUserModelId\io.github.solidsnake1765.localvot"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\io.github.solidsnake1765.localvot"
 !macroend
