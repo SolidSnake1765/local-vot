@@ -1,7 +1,7 @@
 {
   "name": "local-vot",
   "productName": "Local VOT",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Закадровый перевод локальных видео через переводчик Яндекса",
   "main": "src/main/main.js",
   "type": "module",

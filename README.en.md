@@ -83,6 +83,18 @@ a Yandex account. A little Disk space is needed — up to ~2 MB per minute of vi
 > The app is not signed with a paid certificate, so on first launch Windows may show
 > "Windows protected your PC". Click **More info → Run anyway**.
 
+## Updating
+
+New versions appear on the [releases](https://github.com/SolidSnake1765/local-vot/releases) page.
+To get notified: the **Watch** button at the top of the repository page → **Custom** → **Releases**.
+Settings, the Yandex sign-in and the log are kept when updating.
+
+- **Installer** — close the app, download the new `…-setup.exe` and run it: it installs over the old
+  version, into the same folder.
+- **Portable** — close the app and unpack the new archive **into the same place where the "Local VOT"
+  folder is** (not inside it), replacing the files. The `data` folder with your settings is not replaced —
+  it is not in the archive.
+
 ## How to use
 
 1. Press **«Войти через Яндекс»** (Sign in with Yandex), open the Yandex page, enter the code from the app and allow access.
