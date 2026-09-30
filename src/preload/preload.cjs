@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld("api", {
   cancelAll: () => ipcRenderer.invoke("jobs:cancelAll"),
   testNotification: () => ipcRenderer.invoke("app:testNotification"),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
+  jobThumb: (id) => ipcRenderer.invoke("jobs:thumb", id),
+  openVideo: (id) => ipcRenderer.invoke("jobs:openVideo", id),
 
   // путь к файлу, брошенному в окно (с Electron 32 File.path больше нет)
   pathForFile: (file) => webUtils.getPathForFile(file),

@@ -147,6 +147,16 @@ function createCard(job) {
   const node = $("jobTpl").content.firstElementChild.cloneNode(true);
   node.querySelector(".job-name").textContent = job.name;
   node.querySelector(".job-name").title = job.file;
+  // миниатюра, как в проводнике; клик — открыть видео в плеере
+  const thumb = node.querySelector(".job-thumb");
+  thumb.onclick = () => api.openVideo(job.id);
+  api.jobThumb(job.id).then((url) => {
+    thumb.classList.remove("loading");
+    if (!url) return; // не вышло — остаётся значок-заглушка
+    const img = thumb.querySelector("img");
+    img.src = url;
+    img.hidden = false;
+  });
   const steps = {};
   const ol = node.querySelector(".steps");
   for (const s of STEPS) {

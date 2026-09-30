@@ -1,5 +1,5 @@
 // Главный процесс: окно, вход в Яндекс, очередь заданий перевода.
-import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, screen, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,8 @@ import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindow
 import * as disk from "./yadisk.js";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir } from "./pipeline.js";
-import { renderPreview, setTempDir } from "./media.js";
+import { grabFrame, probe, renderPreview, setTempDir } from "./media.js";
+import { limiter } from "./limit.js";
 import { isPortable, setupDataPaths, workRoot } from "./paths.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 import { hide, hideVideo, initLog, log, logDir } from "./log.js";
@@ -624,6 +625,7 @@ ipcMain.handle("jobs:remux", (_e, id) => {
 });
 /** Убрать видео из списка: вместе с сохранённым переводом и копией на Диске (файлы на компьютере остаются). */
 function dropJob(job) {
+  thumbs.delete(job.id);
   const i = queue.indexOf(job);
   if (i >= 0) queue.splice(i, 1);
   jobs.delete(job.id);
@@ -655,6 +657,43 @@ ipcMain.handle("jobs:clear", (_e, mode) => {
   return targets.map((j) => j.id);
 });
 ipcMain.handle("shell:showItem", (_e, p) => shell.showItemInFolder(p));
+
+// ---------- миниатюры видео ----------
+// Как в проводнике: миниатюру даёт сама Windows (тем же механизмом, что и проводник, из её кэша — мгновенно).
+// Не умеет (нет кодека, например HEVC без расширения) — кадр через ffmpeg. Не больше двух сразу, чтобы
+// добавление папки из десятков видео не нагружало компьютер. Готовые храним, пока видео в списке.
+const thumbs = new Map(); // id → промис data:-адреса картинки (или null)
+const thumbTurn = limiter(2);
+
+async function makeThumb(job) {
+  const release = await thumbTurn.acquire();
+  try {
+    const file = path.normalize(job.file); // Windows нужен путь с обратными слэшами
+    try {
+      const img = await nativeImage.createThumbnailFromPath(file, { width: 320, height: 180 });
+      if (!img.isEmpty()) return img.toDataURL();
+    } catch { /* Windows не смогла — пробуем ffmpeg */ }
+    const { duration } = await probe(file).catch(() => ({ duration: 0 }));
+    const jpeg = await grabFrame(file, duration);
+    return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+  } catch (e) {
+    log.warn(`видео #${job.no}`, "миниатюра не получилась", e);
+    return null;
+  } finally {
+    release();
+  }
+}
+ipcMain.handle("jobs:thumb", (_e, id) => {
+  const job = jobs.get(id);
+  if (!job) return null;
+  if (!thumbs.has(id)) thumbs.set(id, makeThumb(job));
+  return thumbs.get(id);
+});
+// клик по миниатюре — открыть видео в плеере по умолчанию (только видео из списка, по id)
+ipcMain.handle("jobs:openVideo", (_e, id) => {
+  const job = jobs.get(id);
+  if (job) shell.openPath(job.file);
+});
 
 // ---------- окно ----------
 /**

@@ -23,15 +23,10 @@
   <img src="docs/screenshot-main.png" alt="Local VOT window: video queue and settings">
 </p>
 
-> [!NOTE]
-> **This project is 100% vibe-coded.** All of the code was written by AI — [Claude](https://claude.ai) by
-> Anthropic. The author set the tasks, designed how the app should work, tested it on real videos and made
-> the decisions. The app's interface is in Russian.
-
 ## What it is
 
 Yandex has great video voice-over translation, but it only works in the browser and only for online videos.
-**Local VOT** translates videos stored on your computer. The translation is always **into Russian**.
+**Local VOT** translates videos stored on your computer. The translation is always **into Russian**, and the app's interface is in Russian too.
 
 It is built on two open-source libraries: [vot.js](https://github.com/FOSWLY/vot.js) talks to the Yandex
 translator, [ffmpeg](https://ffmpeg.org) handles audio and video. The idea is to get translations through
@@ -57,7 +52,7 @@ add a video, press "Start", get the translated video.
   Chinese, Korean, Arabic. The app warns you if the language is set wrong.
 - **No censorship** — translates any video.
 - **Queue** — add whole folders, reorder by drag-and-drop, press "Start all". Already translated videos are skipped.
-  Progress counter and overall bar, "Cancel all", "Clear".
+  Video thumbnails like in Windows Explorer; progress counter and overall bar, "Cancel all", "Clear".
 - **Several videos at once** — up to 8: upload and translation run in parallel, while reading videos from disk and
   saving go one at a time so the disk doesn't slow down.
 - **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.

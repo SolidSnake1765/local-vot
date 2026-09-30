@@ -45,6 +45,29 @@ function ffmpeg(args, { duration, onProgress, signal } = {}) {
   });
 }
 
+/**
+ * Кадр для миниатюры (JPEG, ширина 320) — когда Windows не умеет сделать миниатюру сама (нет кодека).
+ * Берём кадр с 10 % длительности (не дальше 60 с): в самом начале часто чёрная заставка.
+ * -ss перед -i — прыжок, а не чтение с начала: быстро даже на десятках гигабайт.
+ */
+export async function grabFrame(file, duration = 0) {
+  const at = Math.min(60, Math.max(0, duration * 0.1));
+  return new Promise((resolve, reject) => {
+    const p = spawn(FFMPEG, ["-hide_banner", "-v", "error", "-ss", at.toFixed(2), "-i", file, "-frames:v", "1",
+      "-vf", "scale=320:-2", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"], { windowsHide: true });
+    const chunks = [];
+    let err = "";
+    p.stdout.on("data", (d) => chunks.push(d));
+    p.stderr.on("data", (d) => { err = (err + d).slice(-500); });
+    p.on("error", reject);
+    p.on("close", (code) => {
+      const buf = Buffer.concat(chunks);
+      if (code === 0 && buf.length) resolve(buf);
+      else reject(new Error(`ffmpeg: кадр не получен ${err.trim()}`));
+    });
+  });
+}
+
 /** Длительность видео в секундах; заодно проверяет, что в файле есть звук. */
 export async function probe(file) {
   // ffmpeg без выходного файла завершается с ошибкой, но сведения о файле печатает
