@@ -14,20 +14,26 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Вход отменён")); }, { once: true });
 });
 
+// токен нужен каждому видео и каждому удалению копии с Диска — с диска читаем один раз, дальше из памяти
+// (undefined — ещё не читали, null — входа нет)
+let cached;
+
 function saveToken(token) {
   const json = JSON.stringify(token);
   const data = safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(json) : Buffer.from(json);
   writeFileSync(tokenFile(), data);
+  cached = token;
 }
 
 function loadToken() {
+  if (cached !== undefined) return cached;
+  cached = null;
   if (!existsSync(tokenFile())) return null;
   const buf = readFileSync(tokenFile());
   try {
-    return JSON.parse(safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString());
-  } catch {
-    return null;
-  }
+    cached = JSON.parse(safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString());
+  } catch { /* файл испорчен — нужен новый вход */ }
+  return cached;
 }
 
 async function postForm(url, params, signal) {
@@ -107,4 +113,5 @@ export async function getAccount(token) {
 
 export function logout() {
   rmSync(tokenFile(), { force: true });
+  cached = null;
 }

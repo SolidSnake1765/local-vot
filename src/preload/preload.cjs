@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld("api", {
   retranslate: (id) => ipcRenderer.invoke("jobs:retranslate", id),
   remux: (id) => ipcRenderer.invoke("jobs:remux", id),
   setJobSound: (id, patch) => ipcRenderer.invoke("jobs:setSound", id, patch),
+  setJobSave: (id, patch) => ipcRenderer.invoke("jobs:setSave", id, patch),
+  showSource: (id) => ipcRenderer.invoke("jobs:showSource", id),
   preview: (id, start) => ipcRenderer.invoke("jobs:preview", id, start),
   removeJob: (id) => ipcRenderer.invoke("jobs:remove", id),
   clearInfo: () => ipcRenderer.invoke("jobs:clearInfo"),

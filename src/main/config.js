@@ -43,18 +43,26 @@ export const DEFAULT_SETTINGS = {
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 
+// настройки читаются постоянно (очередь, сохранение, уведомления) — с диска только один раз,
+// дальше из памяти; меняет их только saveSettings, она же обновляет копию в памяти
+let cached = null;
+
 export function loadSettings() {
-  try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(settingsFile(), "utf8")) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
+  if (!cached) {
+    try {
+      cached = { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(settingsFile(), "utf8")) };
+    } catch {
+      cached = { ...DEFAULT_SETTINGS };
+    }
   }
+  return { ...cached };
 }
 
 export function saveSettings(patch) {
   const next = { ...loadSettings(), ...patch };
   writeFileSync(settingsFile(), JSON.stringify(next, null, 1));
-  return next;
+  cached = next;
+  return { ...next };
 }
 
 // ---------- размер и положение окна: как закрыли, так и откроется ----------

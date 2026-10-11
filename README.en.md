@@ -52,7 +52,8 @@ add a video, press "Start", get the translated video.
   Chinese, Korean, Arabic. The app warns you if the language is set wrong.
 - **No censorship** — translates any video.
 - **Queue** — add whole folders, reorder by drag-and-drop, press "Start all". Already translated videos are skipped.
-  Video thumbnails like in Windows Explorer; progress counter and overall bar, "Cancel all", "Clear".
+  Video thumbnails like in Windows Explorer and a "Show in folder" button; progress counter and overall bar (stays
+  visible while you scroll the list), "Cancel all", "Clear". Stays smooth even with a hundred videos.
 - **Several videos at once** — up to 8: upload and translation run in parallel, while reading videos from disk and
   saving go one at a time so the disk doesn't slow down.
 - **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.
@@ -60,9 +61,11 @@ add a video, press "Start", get the translated video.
   The result is saved in the same format as the source (or always MKV — your choice).
 - **No quality loss** — the picture is copied as is, the audio is saved at no lower quality than the original.
 - **Per-video sound settings** — original and translation volume with a preview right in the app;
-  changed it — re-save in seconds, without translating again.
+  changed it — re-save in seconds, without translating again. The translation volume adapts to the original
+  where the speech is, and loud videos don't distort.
 - **What to save** — the translated video (with embedded subtitles), a separate `.m4a` audio track
-  (for players with external tracks), the translation voice `.mp3`, subtitles `.srt`.
+  (for players with external tracks), the translation voice `.mp3`, subtitles `.srt`. Defaults are set in the
+  settings and can be changed for any single video in its card.
 - **Privacy** — only the audio goes to the Disk (the picture is replaced by a black frame), the copy is private
   and removed afterwards. The app's log contains no video names.
 

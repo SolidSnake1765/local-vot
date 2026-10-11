@@ -209,9 +209,12 @@ option { background: var(--surface); }
 .job[data-state="error"]::before { background: linear-gradient(90deg, var(--err), rgba(255, 122, 138, .15)); }
 .job[data-state="queued"], .job[data-state="cancelled"] { opacity: .88; }
 
-.job-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-.job-title { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 220px; }
-.job-name { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+/* строка названия: слева миниатюра, название, состояние; справа — только действия (Старт / Отменить / Убрать) */
+.job-title { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 auto; }
+.job-run { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.job-name { flex: 0 1 auto; min-width: 0; font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-title .badge, .job-title .job-thumb, .job-title .drag-handle { flex-shrink: 0; }
 .badge {
   display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
   font-size: 12px; font-weight: 600; padding: 2px 10px 2px 8px; border-radius: 99px;
@@ -258,7 +261,9 @@ option { background: var(--surface); }
   animation: flow 1.8s linear infinite; box-shadow: 0 0 10px rgba(126, 224, 255, .45);
 }
 
-.job-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+/* настройки этого видео — строкой ниже; «В папке» прижата вправо */
+.job-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; margin-top: 10px; }
+.job-controls .job-folder { margin-left: auto; }
 .job-controls select { width: auto; margin: 0; padding: 5px 28px 5px 9px; font-size: 13px; }
 .job-note { margin: 10px 0 0; font-size: 12px; color: var(--warn); }
 .job-actions {
@@ -351,6 +356,7 @@ option { background: var(--surface); }
   .layout { grid-template-columns: 1fr 272px; }
   .work { padding: 16px; }
   .panel { padding: 2px 16px 14px; }
+  .queue-bar { top: -16px; margin: 0 -16px 14px; padding: 0 16px 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }
@@ -482,3 +488,54 @@ option { background: var(--surface); }
 .job-thumb:hover { border-color: var(--accent); transform: scale(1.04); }
 .job-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-thumb.loading { animation: pulse 1.4s ease-in-out infinite; }
+
+/* ---------- шапка очереди не уезжает при прокрутке длинного списка ---------- */
+/* .work прокручивается сам; полоса прилипает к его верху и закрывает карточки под собой */
+.queue-sentinel { height: 0; }
+.queue-bar {
+  position: sticky; top: -20px; z-index: 5; /* -20px — отступ сверху у .work: прилипает к самому краю */
+  margin: 0 -22px 14px; padding: 0 22px 10px;
+  background: var(--bg);
+}
+.queue-bar .jobs-head h2 { margin-top: 18px; }
+/* прилипла — отделяется тенью от карточек под ней (размер тот же: список не дёргается) */
+.queue-bar.stuck { box-shadow: 0 1px 0 var(--border-soft), 0 12px 18px -12px rgba(0, 0, 0, .9); }
+
+/* длинная очередь: карточки за пределами экрана не отрисовываются, пока до них не докрутят */
+.job { content-visibility: auto; contain-intrinsic-size: auto 190px; }
+
+/* кнопка «В папке» в карточке */
+.job-folder svg { fill: none; }
+
+/* что сохранять для этого видео: переключатели-«таблетки» */
+.save-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.save-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.pill {
+  padding: 3px 10px; border-radius: 99px; cursor: pointer; font: inherit; font-size: 12px; line-height: 1.4;
+  color: var(--muted); background: transparent; border: 1px solid var(--border);
+  transition: color .15s, border-color .15s, background .15s;
+}
+.pill:hover:not(:disabled) { color: var(--text); border-color: #3a4470; }
+.pill.on { color: var(--text); background: rgba(126, 224, 255, .1); border-color: rgba(126, 224, 255, .45); }
+.pill:disabled { opacity: .45; cursor: default; }
+.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.save-format { width: auto; margin: 0; padding: 2px 24px 2px 9px; font-size: 12px; border-radius: 99px; background-position: right 8px center; background-size: 10px 7px; }
+.save-label { cursor: help; }
+.save-row.own .save-label { color: var(--accent-3); font-weight: 600; }
+.pill.save-reset { opacity: 1; color: var(--accent-3); border-color: rgba(159, 123, 255, .35); border-style: dashed; }
+.pill.save-reset:hover:not(:disabled) { color: var(--text); border-color: var(--accent-3); }
+.save-warn { color: var(--warn); margin-left: 4px; }
+.pill.on::before { content: "✓"; margin-right: 5px; color: var(--accent); font-weight: 700; }
+.pill:not(.on) { opacity: .8; }
+.queue-bar .queue-progress { margin-bottom: 0; }
+
+/* шапка панели справа: это настройки по умолчанию, у отдельного видео они меняются в карточке */
+.panel-head { margin: 18px 0 4px; padding-bottom: 14px; border-bottom: 1px solid var(--border-soft); }
+.panel-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.panel-sub { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.panel .panel-head + h2 { padding-top: 0; border-top: 0; }
+.note.tight.flush { margin-left: 0; }
+
+/* язык оригинала в карточке — с подписью, чтобы было ясно, что это язык речи в видео */
+.job-lang-box { display: inline-flex; align-items: center; gap: 7px; }
+.job-lang-label { font-size: 12px; color: var(--muted); white-space: nowrap; }

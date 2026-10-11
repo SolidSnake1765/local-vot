@@ -247,6 +247,67 @@ export async function measureLoudness(file, signal) {
 }
 
 /**
+ * Громкость звука во времени (EBU R128): общая громкость (integrated, LUFS) и мгновенная громкость
+ * (окно 400 мс) каждые PROFILE_STEP секунд — по ней потом считается, насколько громок оригинал именно
+ * там, где звучит перевод (loudnessDuring). Один проход ffmpeg, как и для общей громкости.
+ * @returns { integrated, step, m: Float32Array } или null — если измерить не вышло
+ */
+const PROFILE_STEP = 0.2; // = 2 значения ebur128 (он пишет каждые 0,1 с)
+export async function loudnessProfile(file, signal) {
+  const values = [];
+  let integrated = NaN;
+  await new Promise((resolve) => {
+    const p = spawn(FFMPEG, ["-hide_banner", "-nostdin", "-nostats", "-i", file, "-map", "0:a:0",
+      "-af", "ebur128=framelog=info", "-f", "null", "-"], { windowsHide: true });
+    const onAbort = () => p.kill();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // строк — по десять на секунду звука: разбираем по мере поступления, не копя весь вывод
+    let rest = "";
+    let n = 0; // ebur128 пишет значение каждые 0,1 с, берём каждое второе: i-е — на (i + 1) · 0,2 с
+    p.stderr.on("data", (d) => {
+      const lines = (rest + d).split("\n");
+      rest = lines.pop();
+      for (const line of lines) {
+        const m = /\bt:\s*([\d.]+)\s+TARGET:\S+\s+LUFS\s+M:\s*(-?[\d.]+|-inf)/.exec(line);
+        if (m) {
+          if (++n % 2 === 0) values.push(m[2] === "-inf" ? -120 : Number(m[2]));
+          continue;
+        }
+        const i = /^\s*I:\s+(-?\d+(?:\.\d+)?) LUFS/.exec(line);
+        if (i) integrated = Number(i[1]); // итог печатается в конце; последнее значение и есть общее
+      }
+    });
+    p.on("error", () => resolve());
+    p.on("close", () => { signal?.removeEventListener("abort", onAbort); resolve(); });
+  });
+  signal?.throwIfAborted();
+  if (!Number.isFinite(integrated) || integrated <= -60) return null; // -70 — это тишина
+  return { integrated, step: PROFILE_STEP, m: Float32Array.from(values) };
+}
+
+/**
+ * Громкость звука (LUFS) только в указанные промежутки времени — по профилю loudnessProfile, с тем же
+ * гейтингом, что у EBU R128: тишина (ниже -70) и куски на 10 LU тише среднего в расчёт не входят.
+ * null — в эти промежутки звука нет совсем.
+ */
+export function loudnessDuring(profile, segments) {
+  if (!profile?.m?.length || !segments?.length) return null;
+  const { m, step } = profile;
+  const picked = [];
+  let s = 0;
+  for (let i = 0; i < m.length && s < segments.length; i++) {
+    const t = (i + 1) * step - 0.2; // середина окна 400 мс, которым мерилось значение
+    while (s < segments.length && segments[s][1] < t) s++;
+    if (s < segments.length && t >= segments[s][0] && m[i] > -70) picked.push(m[i]);
+  }
+  if (!picked.length) return null;
+  const mean = (arr) => 10 * Math.log10(arr.reduce((a, v) => a + 10 ** (v / 10), 0) / arr.length);
+  const gate = mean(picked) - 10;
+  const loud = picked.filter((v) => v > gate);
+  return loud.length ? mean(loud) : null;
+}
+
+/**
  * Где в дорожке перевода звучит речь: [[начало, конец], ...] в секундах.
  * Ищем тишину (silencedetect) и берём промежутки между ней.
  */
@@ -314,6 +375,9 @@ const AUTO_GAIN_MIN_DB = -20;
 const AUTO_GAIN_MAX_DB = 12;
 // перевод чуть громче оригинала — иначе при оригинале на 100 % речь тонет
 const AUTO_TARGET_OFFSET_DB = 3;
+// потолок итоговой дорожки: -1 dBFS. Оригинал + перевод, сложенные вместе, на громком видео выходят
+// за 0 dBFS — без ограничителя это хрип; ограничитель срабатывает только на таких пиках
+const LIMIT = 0.891;
 
 /**
  * Разбор дорожки перевода: громкость речи и где она звучит. Делается один раз после перевода —
@@ -325,21 +389,35 @@ export async function analyzeVoice(voice, signal) {
 }
 
 /**
+ * Насколько громок оригинал для подстройки перевода (LUFS): там, где звучит перевод (по профилю
+ * громкости), — то, с чем перевод на самом деле звучит вместе. Общая громкость видео сбивается громкой
+ * музыкой, взрывами или долгой тишиной, а речь обычно тише них. Профиля нет — общая громкость.
+ */
+function origReference(opts, analysis) {
+  const during = loudnessDuring(opts.origProfile, analysis.segments);
+  return during ?? opts.origLoudness ?? null;
+}
+
+/**
  * Граф фильтров сведения: [0] — звук оригинала, [1] — перевод → [mix].
  *
  * mixMode "duck"     — оригинал на originalVolume %, только пока звучит перевод; в паузах 100 %;
  *         "constant" — оригинал всё время на originalVolume %.
- * autoLevel + origLoudness (LUFS оригинала) — перевод подгоняется по громкости к оригиналу,
- * voiceGain применяется поверх.
- * offset — с какой секунды вырезан кусок (для предпрослушивания): фразы сдвигаются к началу куска.
+ * autoLevel + origProfile / origLoudness (громкость оригинала) — перевод подгоняется по громкости
+ * к оригиналу там, где звучит (origReference), voiceGain применяется поверх.
+ * В конце — ограничитель пиков (LIMIT): сумма двух звуков не должна хрипеть.
+ * offset — с какой секунды вырезан кусок (для предпрослушивания): фразы сдвигаются к началу куска;
+ * громкость для подстройки при этом считается по всему видео — кусок звучит так же, как в файле.
+ * duration — длина итога, с (длина видео); null — по длине входов.
  */
-function mixFilter(opts, analysis, offset = 0) {
-  const { voiceGain = 1, originalVolume = 30, mixMode = "duck", autoLevel = true, origLoudness = null } = opts;
+function mixFilter(opts, analysis, offset = 0, duration = null) {
+  const { voiceGain = 1, originalVolume = 30, mixMode = "duck", autoLevel = true } = opts;
   const level = Math.min(100, Math.max(0, Number(originalVolume) || 0)) / 100;
 
   let autoGainDb = null;
-  if (autoLevel && origLoudness !== null && analysis.loudness !== null) {
-    autoGainDb = Math.min(AUTO_GAIN_MAX_DB, Math.max(AUTO_GAIN_MIN_DB, origLoudness + AUTO_TARGET_OFFSET_DB - analysis.loudness));
+  const origRef = autoLevel ? origReference(opts, analysis) : null;
+  if (origRef !== null && analysis.loudness !== null) {
+    autoGainDb = Math.min(AUTO_GAIN_MAX_DB, Math.max(AUTO_GAIN_MIN_DB, origRef + AUTO_TARGET_OFFSET_DB - analysis.loudness));
   }
   const voiceVolume = voiceGain * 10 ** ((autoGainDb ?? 0) / 20);
 
@@ -361,7 +439,13 @@ function mixFilter(opts, analysis, offset = 0) {
   const filter = [
     `[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=${voiceVolume.toFixed(4)}[voice]`,
     origChain,
-    "[duck][voice]amix=inputs=2:duration=first:normalize=0[mix]",
+    // длина — по видео: amix с duration=first у некоторых звуков (FLAC — частый в MKV) обрывает конец
+    // на ~1,5 с, поэтому сводим по самому длинному входу и обрезаем точно по длине видео.
+    // Ограничитель: level=0 — сам громкость не поднимает; упреждение (attack) 1 мс — на столько он задерживает
+    // звук, это не слышно. Компенсацию задержки (latency=1) не включаем: она сбивает метки времени, и у видео,
+    // где звук начинается позже картинки, перевод разъезжался бы с оригиналом
+    `[duck][voice]amix=inputs=2:duration=longest:normalize=0${duration ? `,atrim=end=${duration.toFixed(3)}` : ""},`
+      + `alimiter=limit=${LIMIT}:attack=1:release=80:level=0[mix]`,
   ].join(";\n");
   return { filter, autoGainDb };
 }
@@ -385,7 +469,7 @@ async function withFilterScript(filter, run) {
  */
 export async function mux(video, voice, subs, out, opts = {}, duration, onProgress, signal, plan = mkvPlan("")) {
   const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
-  const { filter, autoGainDb } = mixFilter(opts, analysis);
+  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration);
   const withSubs = Boolean(subs && plan.subs);
   // opts.origInfo — сведения о звуке оригинала (probe().audio): перевод кодируем не хуже него
   const src = opts.origInfo ?? {};
@@ -420,7 +504,7 @@ export async function mux(video, voice, subs, out, opts = {}, duration, onProgre
  */
 export async function mixAudio(orig, voice, out, opts = {}, duration, onProgress, signal) {
   const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
-  const { filter, autoGainDb } = mixFilter(opts, analysis);
+  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration);
   await withFilterScript(filter, (script) => ffmpeg([
     "-v", "error", "-stats",
     ...origInput(orig), "-i", voice,

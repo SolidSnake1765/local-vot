@@ -1,20 +1,23 @@
 // Главный процесс: окно, вход в Яндекс, очередь заданий перевода.
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
 import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { readdir, rename, rm, stat } from "node:fs/promises";
 import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir } from "./pipeline.js";
 import { grabFrame, probe, renderPreview, setTempDir } from "./media.js";
 import { limiter } from "./limit.js";
+import { stopThumbHelper, windowsThumb } from "./thumbs.js";
 import { isPortable, setupDataPaths, workRoot } from "./paths.js";
 import { LIVELY_LANG, SOURCE_LANGS } from "./languages.js";
 import { hide, hideVideo, initLog, log, logDir } from "./log.js";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 // портативная версия — все данные в папке data рядом с программой (до готовности приложения)
 setupDataPaths();
@@ -50,7 +53,32 @@ let batch = { done: 0, failed: 0 };
 
 function publicJob(j) {
   return { id: j.id, file: j.file, name: j.name, state: j.state, lively: j.lively, lang: j.lang,
-    voiceUsed: j.voiceUsed, langUsed: j.langUsed };
+    voiceUsed: j.voiceUsed, langUsed: j.langUsed, save: j.save ?? null };
+}
+
+/**
+ * Ход работы видео — в окно. Загрузка сообщает о каждых 64 КБ, ffmpeg — о каждой строке вывода: это сотни
+ * сообщений в секунду, и окно тратило бы время на перерисовку цифр, которых глаз не успевает увидеть.
+ * Поэтому проценты и подписи одного шага копятся и уходят не чаще раза в PROGRESS_MS; смена состояния
+ * (шаг начат, готов, ошибка; видео готово) — сразу, вместе с накопленным.
+ */
+const PROGRESS_MS = 150;
+function progressSender(id) {
+  let pending = null;
+  let timer = null;
+  const flush = () => {
+    clearTimeout(timer);
+    timer = null;
+    if (pending) send("job:update", pending);
+    pending = null;
+  };
+  const push = (patch) => {
+    if (pending && pending.step !== patch.step) flush();
+    pending = { ...(pending ?? { id }), ...patch };
+    if (patch.state !== undefined) flush();
+    else timer ??= setTimeout(flush, PROGRESS_MS);
+  };
+  return { push, flush };
 }
 
 function enqueue(job, mode = "translate", replace = false) {
@@ -99,23 +127,26 @@ async function runOne(job) {
   send("job:update", { id: job.id, state: "running" });
   const scope = `видео #${job.no}`;
   const t0 = Date.now();
+  let progress = null; // ход работы в окно (см. progressSender); перед итогом — сначала накопленное
   log.info(scope, job.mode === "remux" ? "пересборка из готового перевода"
     : `перевод: ${job.lively ? "живые" : "обычные"} голоса, язык ${job.lang}${job.replace ? ", заменить прежнюю версию" : ""}`);
   try {
     const token = await auth.getToken();
     if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
-    // настройки читаются в момент сохранения: общие + звук этого видео (если его уже настраивали в карточке)
+    // настройки читаются в момент сохранения: общие + что сохранять и звук этого видео (если их меняли в карточке)
     let soundUsed = null;
     const getOptions = () => {
-      const options = { ...loadSettings(), ...(job.sound ?? {}) };
+      const options = { ...loadSettings(), ...(job.save ?? {}), ...(job.sound ?? {}) };
       soundUsed = pickSound(options);
       return options;
     };
+    progress = progressSender(job.id);
     const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
-      send("job:update", { id: job.id, ...patch });
+      progress.push(patch);
     }, job.controller.signal);
     const { outputs, lively, lang } = await run;
+    progress.flush();
     const { files, stuck } = await replaceOutputs(job.replace ? (job.outputs ?? []) : [], outputs);
     job.outputs = [...(job.replace ? [] : job.outputs ?? []), ...files];
     // звук, с которым собраны файлы, закрепляется за видео: дальше его меняют только в карточке
@@ -132,6 +163,7 @@ async function runOne(job) {
       hasTranslation: true, preview: previewInfo(job),
       note: stuck ? `Прежнюю версию убрать не удалось (файлов: ${stuck}) — возможно, она открыта в плеере. Новая сохранена рядом.` : "" });
   } catch (e) {
+    progress?.flush();
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
     if (job.state === "cancelled") log.info(scope, `отменено через ${Math.round((Date.now() - t0) / 1000)} с`);
     else {
@@ -180,7 +212,7 @@ async function makeDiskRoom() {
 // ---------- уведомления Windows ----------
 // Имя программы для Windows (AppUserModelID). У установленной оно же стоит на ярлыке в «Пуске».
 const AUMID = app.isPackaged ? "io.github.solidsnake1765.localvot" : "io.github.solidsnake1765.localvot.dev";
-let aumidRegistered = false;
+let aumidRegistered = null; // промис регистрации (делается один раз)
 
 /**
  * Windows показывает уведомления только «знакомым» программам. У запуска из исходников и у портативной
@@ -189,14 +221,17 @@ let aumidRegistered = false;
  * Делается при первом уведомлении (выключены — в реестр ничего не пишем); деинсталлятор ключ убирает.
  */
 function registerAumid() {
-  if (aumidRegistered || process.platform !== "win32") return;
-  aumidRegistered = true;
+  if (process.platform !== "win32") return Promise.resolve();
+  aumidRegistered ??= writeAumid();
+  return aumidRegistered;
+}
+async function writeAumid() {
   const key = `HKCU\\Software\\Classes\\AppUserModelId\\${AUMID}`;
   const icon = app.isPackaged ? path.join(process.resourcesPath, "icon.png") : path.join(ROOT, "assets", "icon-512.png");
   const name = app.isPackaged ? "Local VOT" : "Local VOT (разработка)";
   try {
     for (const [value, data] of [["DisplayName", name], ["IconUri", icon]]) {
-      execFileSync("reg", ["add", key, "/v", value, "/t", "REG_SZ", "/d", data, "/f"], { windowsHide: true, stdio: "ignore" });
+      await promisify(execFile)("reg", ["add", key, "/v", value, "/t", "REG_SZ", "/d", data, "/f"], { windowsHide: true });
     }
   } catch (e) {
     log.warn("уведомления", "не удалось зарегистрировать программу в Windows", e);
@@ -207,7 +242,7 @@ function registerAumid() {
  * Уведомление — только если окно не на переднем плане (иначе и так всё видно) и не выключено в
  * настройках (force — кнопка «Проверить»). Плюс мигание значка на панели задач, пока окно не откроют.
  */
-function notify(title, body, { force = false } = {}) {
+async function notify(title, body, { force = false } = {}) {
   if (!win) return false;
   if (!force && !loadSettings().notifications) return false;
   if (!force && win.isFocused()) {
@@ -219,7 +254,8 @@ function notify(title, body, { force = false } = {}) {
     log.warn("уведомления", "Windows сообщает, что уведомления не поддерживаются");
     return false;
   }
-  registerAumid();
+  await registerAumid(); // до первого показа: иначе Windows не знает программу и молча не покажет
+  if (!win) return false;
   const n = new Notification({ title, body: String(body ?? "").slice(0, 200), icon: path.join(ROOT, "assets", "icon-512.png") });
   shownNotifications.add(n); // держим ссылку, иначе уведомление может пропасть раньше, чем по нему нажмут
   const forget = () => shownNotifications.delete(n);
@@ -242,28 +278,29 @@ const isVideo = (file) => VIDEO_EXT.includes(path.extname(file).slice(1).toLower
 // наши же результаты: «имя [RU].mkv», «имя [RU живые] (2).mkv» — их переводить не надо
 const isOurOutput = (file) => /\[RU[^\]]*\]( \(\d+\))?$/.test(path.parse(file).name);
 
-/** Перевод этого видео уже лежит рядом с ним или в папке сохранения (любой из наших файлов). */
-function alreadyTranslated(file, outputDir) {
+/**
+ * Перевод этого видео уже лежит рядом с ним или в папке сохранения (любой из наших файлов).
+ * existing — все файлы этих папок (полные пути в нижнем регистре): папку читаем один раз, а не
+ * проверяем каждое возможное имя на диске — на жёстком диске это сотни обращений на каждое видео.
+ */
+function alreadyTranslated(file, outputDir, existing) {
   const { dir, name } = path.parse(file);
   const names = [];
   for (const tag of ["RU", "RU живые"]) {
     names.push(...VIDEO_EXT.map((e) => `${name} [${tag}].${e}`), `${name} [${tag}].m4a`, `${name} [${tag}, голос].mp3`);
   }
   names.push(`${name} [RU].srt`);
-  return [dir, outputDir].filter(Boolean).some((d) => names.some((n) => existsSync(path.join(d, n))));
+  return [dir, outputDir].filter(Boolean).some((d) => names.some((n) => existing.has(path.join(d, n).toLowerCase())));
 }
 
-/** Все видео папки, включая вложенные, по порядку имён. */
-function videosInFolder(dir) {
-  let entries;
+/** Все файлы папки, включая вложенные (полные пути); нет доступа — пусто. */
+async function filesInFolder(dir, recursive = true) {
   try {
-    entries = readdirSync(dir, { recursive: true, withFileTypes: true });
+    const entries = await readdir(dir, { recursive, withFileTypes: true });
+    return entries.filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name));
   } catch {
     return [];
   }
-  return entries.filter((e) => e.isFile() && isVideo(e.name))
-    .map((e) => path.join(e.parentPath, e.name))
-    .sort((a, b) => a.localeCompare(b, "ru", { numeric: true }));
 }
 
 /**
@@ -281,7 +318,7 @@ async function replaceOutputs(old, fresh) {
   const kept = [];
   let stuck = 0;
   for (const p of old) {
-    if (!existsSync(p)) continue;
+    if (!(await stat(p).catch(() => null))) continue;
     if (!kinds.has(kind(p))) {
       kept.push(p);
       continue;
@@ -296,7 +333,7 @@ async function replaceOutputs(old, fresh) {
     const i = files.findIndex((n) => ext(n) === ext(p) && base(n) === base(p));
     if (i < 0) continue;
     try {
-      renameSync(files[i], p);
+      await rename(files[i], p);
       files[i] = p;
     } catch { /* остаётся с номером — не страшно */ }
   }
@@ -307,31 +344,40 @@ async function replaceOutputs(old, fresh) {
  * Добавляет в очередь файлы и папки. Из папок берём только то, что ещё не переведено; видео,
  * которые уже есть в списке, не дублируем. Возвращает добавленные задания и пояснение, что пропущено.
  */
-function addJobs(paths) {
+async function addJobs(paths) {
   const settings = loadSettings();
   const { livelyVoice: lively, sourceLang } = settings;
   const lang = lively ? LIVELY_LANG : sourceLang;
-  const inList = new Set([...jobs.values()].map((j) => path.resolve(j.file).toLowerCase()));
   const skipped = { inList: 0, translated: 0, outputs: 0 };
   let foldersEmpty = 0;
   const rejected = []; // отдельные файлы, которые не видео (в папках прочие файлы просто не берём)
   const files = [];
+  // папка сохранения — один раз на всё добавление (в ней ищем уже готовые переводы)
+  let outputFiles = null;
   for (const p of paths) {
-    let isDir = false;
-    try { isDir = statSync(p).isDirectory(); } catch { rejected.push(p); continue; }
-    if (!isDir) {
+    const info = await stat(p).catch(() => null);
+    if (!info) { rejected.push(p); continue; }
+    if (!info.isDirectory()) {
       if (isVideo(p)) files.push(p);
       else rejected.push(p);
       continue;
     }
-    const found = videosInFolder(p);
+    const all = await filesInFolder(p);
+    if (settings.outputDir && !outputFiles) outputFiles = await filesInFolder(settings.outputDir, false);
+    const existing = new Set([...all, ...(outputFiles ?? [])].map((f) => f.toLowerCase()));
+    const found = all.filter(isVideo).sort((a, b) => a.localeCompare(b, "ru", { numeric: true }));
     if (!found.length) foldersEmpty++;
     for (const file of found) {
       if (isOurOutput(file)) skipped.outputs++;
-      else if (alreadyTranslated(file, settings.outputDir)) skipped.translated++;
+      else if (alreadyTranslated(file, settings.outputDir, existing)) skipped.translated++;
       else files.push(file);
     }
   }
+  // размеры — только для журнала; все сразу, а не по одному
+  const sizes = new Map(await Promise.all(files.map(async (f) => [f, (await stat(f).catch(() => null))?.size ?? 0])));
+  // что уже в списке — после всех ожиданий: пока читались папки, могли добавить что-то ещё (вторую папку);
+  // дальше до конца функции ожиданий нет, так что одно видео дважды не попадёт
+  const inList = new Set([...jobs.values()].map((j) => path.resolve(j.file).toLowerCase()));
   const added = [];
   for (const file of files) {
     const key = path.resolve(file).toLowerCase();
@@ -343,8 +389,7 @@ function addJobs(paths) {
     // без «Запускать сразу» видео ждёт кнопки «Старт» / «Запустить все» — можно расставить порядок
     const no = ++jobCounter;
     hideVideo(file, no);
-    let bytes = 0;
-    try { bytes = statSync(file).size; } catch { /* размер не важен для добавления */ }
+    const bytes = sizes.get(file) ?? 0;
     log.info(`видео #${no}`, `добавлено: ${path.extname(file).slice(1).toUpperCase()}, ${(bytes / 1024 ** 3).toFixed(2)} ГБ`);
     const job = { id: randomUUID(), no, file, name: path.basename(file), state: settings.autoStart ? "queued" : "idle",
       controller: new AbortController(), lively, lang, diskPath: null, duration: null, voiceUsed: null, langUsed: null };
@@ -403,6 +448,24 @@ ipcMain.handle("jobs:setSound", (_e, id, patch) => {
   job.sound = { ...(job.sound ?? pickSound(loadSettings())), ...clean };
 });
 
+// ---------- что сохранять для видео ----------
+// Как со звуком: пока в карточке ничего не меняли (save = null), видео сохраняется по настройкам справа
+// (и следует за их изменениями); поменяли в карточке — у видео свой набор, сброс — снова как в настройках.
+const SAVE_KEYS = ["saveVideo", "videoFormat", "embedSubs", "saveAudio", "saveVoice", "saveSubs"];
+const pickSave = (o) => Object.fromEntries(SAVE_KEYS.map((k) => [k, o[k]]));
+
+ipcMain.handle("jobs:setSave", (_e, id, patch) => {
+  const job = jobs.get(id);
+  if (!job) return null;
+  if (patch === null) {
+    job.save = null;
+  } else {
+    const clean = Object.fromEntries(Object.entries(patch ?? {}).filter(([k]) => SAVE_KEYS.includes(k)));
+    job.save = { ...(job.save ?? pickSave(loadSettings())), ...clean };
+  }
+  return job.save;
+});
+
 // кусок звука с текущими настройками; повторный запрос для того же видео отменяет предыдущий
 ipcMain.handle("jobs:preview", async (_e, id, start) => {
   const job = jobs.get(id);
@@ -415,7 +478,8 @@ ipcMain.handle("jobs:preview", async (_e, id, start) => {
     const settings = { ...loadSettings(), ...(job.sound ?? {}) }; // звук этого видео — как при сохранении
     // звук оригинала — из копии рядом с кэшем: прыжок по ней мгновенный даже на 40-ГБ видео
     const { data, autoGainDb } = await renderPreview(origAudio(job), job.translation.audio, from, PREVIEW_SECONDS,
-      { ...settings, origLoudness: job.origLoudness ?? null, voiceAnalysis: job.translation.analysis },
+      { ...settings, origLoudness: job.origLoudness ?? null, origProfile: job.origProfile ?? null,
+        voiceAnalysis: job.translation.analysis },
       controller.signal);
     // какие настройки применились — чтобы на слух не гадать, дошла ли смена настроек
     return { ok: true, data, start: from, note: describeMix(settings, autoGainDb) };
@@ -430,8 +494,9 @@ ipcMain.handle("jobs:preview", async (_e, id, start) => {
 // ---------- копии на Диске и сохранённые переводы ----------
 function removeTranslationCache(job) {
   job.translation = null;
-  rmSync(translationCacheDir(job.id), { recursive: true, force: true });
-  rmSync(origAudioPath(job.id), { force: true });
+  // не ждём: удаление сотен мегабайт не должно задерживать окно (при выходе папку всё равно уберёт shutdown)
+  rm(translationCacheDir(job.id), { recursive: true, force: true }).catch(() => {});
+  rm(origAudioPath(job.id), { force: true }).catch(() => {});
 }
 
 /** permanently — мимо Корзины Диска независимо от настройки (Корзина тоже занимает место на Диске). */
@@ -458,7 +523,8 @@ async function shutdown() {
     Promise.all([...jobs.values()].map(removeDiskCopy)),
     new Promise((r) => setTimeout(r, 20_000)),
   ]);
-  rmSync(workRoot(), { recursive: true, force: true });
+  await stopThumbHelper(); // его служебные файлы — во временной папке
+  await rm(workRoot(), { recursive: true, force: true, maxRetries: 3 }).catch((e) => log.warn("выход", "временная папка убрана не вся", e));
 }
 
 /** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи). */
@@ -657,9 +723,16 @@ ipcMain.handle("jobs:clear", (_e, mode) => {
   return targets.map((j) => j.id);
 });
 ipcMain.handle("shell:showItem", (_e, p) => shell.showItemInFolder(p));
+// «Показать в папке» у видео в очереди — сам исходник (только видео из списка, по id)
+ipcMain.handle("jobs:showSource", (_e, id) => {
+  const job = jobs.get(id);
+  if (job) shell.showItemInFolder(path.normalize(job.file));
+});
 
 // ---------- миниатюры видео ----------
 // Как в проводнике: миниатюру даёт сама Windows (тем же механизмом, что и проводник, из её кэша — мгновенно).
+// Делает её скрытый помощник в отдельном процессе (thumbs.js): Windows занимает поток, пока читает видео,
+// и в самой программе окно стояло бы — на жёстком диске секундами на каждое видео.
 // Не умеет (нет кодека, например HEVC без расширения) — кадр через ffmpeg. Не больше двух сразу, чтобы
 // добавление папки из десятков видео не нагружало компьютер. Готовые храним, пока видео в списке.
 const thumbs = new Map(); // id → промис data:-адреса картинки (или null)
@@ -668,11 +741,10 @@ const thumbTurn = limiter(2);
 async function makeThumb(job) {
   const release = await thumbTurn.acquire();
   try {
+    if (!jobs.has(job.id)) return null; // пока ждало очереди, видео убрали из списка
     const file = path.normalize(job.file); // Windows нужен путь с обратными слэшами
-    try {
-      const img = await nativeImage.createThumbnailFromPath(file, { width: 320, height: 180 });
-      if (!img.isEmpty()) return img.toDataURL();
-    } catch { /* Windows не смогла — пробуем ffmpeg */ }
+    const url = await windowsThumb(file);
+    if (url) return url;
     const { duration } = await probe(file).catch(() => ({ duration: 0 }));
     const jpeg = await grabFrame(file, duration);
     return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
@@ -774,7 +846,11 @@ app.whenReady().then(() => {
   log.info("запуск", `Local VOT ${app.getVersion()} (${isPortable() ? "портативная" : app.isPackaged ? "установленная" : "разработка"}), `
     + `Windows ${os.release()} ${process.arch}, Electron ${process.versions.electron}, ffmpeg встроенный`);
   // временные файлы и сохранённые переводы прошлого запуска (если он завершился аварийно)
-  rmSync(workRoot(), { recursive: true, force: true });
+  try {
+    rmSync(workRoot(), { recursive: true, force: true });
+  } catch (e) {
+    log.warn("запуск", "временные файлы прошлого запуска убраны не все", e);
+  }
   createWindow();
   purgeLeftovers();
 });

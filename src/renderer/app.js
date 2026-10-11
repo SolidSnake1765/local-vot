@@ -205,6 +205,8 @@ function createCard(job) {
     }
     refreshActions(card);
   };
+  node.querySelector(".job-folder").onclick = () => api.showSource(job.id);
+  setupSave(card, job.save ?? null);
   node.querySelector(".job-cancel").onclick = () => api.cancelJob(job.id);
   node.querySelector(".job-start").onclick = () => api.startJob(job.id);
   node.querySelector(".job-retranslate").onclick = () => api.retranslate(job.id);
@@ -290,6 +292,7 @@ function setState(card, state) {
   card.node.querySelector(".job-lively").disabled = state === "running";
   card.node.querySelector(".job-lang").disabled = state === "running";
   if (state === "running") card.node.querySelector(".job-note").hidden = true;
+  lockSave(card);
   // пока видео переводится или пересобирается заново, слушать нечего — прячем
   if (active) {
     card.node.querySelector(".preview").hidden = true;
@@ -338,6 +341,65 @@ function renderSound(card) {
   }
   q(".snd-orig").title = s.mixMode === "constant" ? "Громкость оригинала всё время" : "Громкость оригинала, пока звучит перевод";
   q(".sound-dirty").hidden = !card.savedSound || sameSound(s, card.savedSound);
+}
+
+// ---------- что сохранять для видео ----------
+// Пока в карточке ничего не меняли (card.save = null), видео сохраняется как отмечено в настройках справа
+// и следует за ними; поменяли — у видео свой набор (главный процесс хранит его в job.save).
+const SAVE_KEYS = ["saveVideo", "videoFormat", "embedSubs", "saveAudio", "saveVoice", "saveSubs"];
+const saveDefaults = {}; // как отмечено в настройках справа (заполняет initSettings)
+const effectiveSave = (card) => card.save ?? saveDefaults;
+
+function setupSave(card, save) {
+  const row = card.node.querySelector(".save-row");
+  card.save = save;
+  card.saveEls = { row, opts: [...row.querySelectorAll(".save-opt")], format: row.querySelector(".save-format"),
+    warn: row.querySelector(".save-warn"), label: row.querySelector(".save-label"), reset: row.querySelector(".save-reset") };
+  const change = async (patch) => {
+    card.save = await api.setJobSave(card.id, patch);
+    renderSave(card);
+    // у готового видео файлы уже записаны — новый набор появится после «Пересобрать видео»
+    if (card.hasTranslation && ["done", "error", "cancelled"].includes(card.state)) {
+      const note = card.node.querySelector(".job-note");
+      note.textContent = "Чтобы сохранить по-новому, нажмите «Пересобрать видео» — Яндекс заново не понадобится.";
+      note.hidden = false;
+    }
+  };
+  for (const b of card.saveEls.opts) b.onclick = () => change({ [b.dataset.key]: !effectiveSave(card)[b.dataset.key] });
+  card.saveEls.format.onchange = () => change({ videoFormat: card.saveEls.format.value });
+  card.saveEls.reset.onclick = () => change(null);
+  renderSave(card);
+}
+
+function renderSave(card) {
+  const s = effectiveSave(card);
+  const { row, opts, format, warn, label, reset } = card.saveEls;
+  for (const b of opts) {
+    const on = Boolean(s[b.dataset.key]);
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(on));
+  }
+  format.value = s.videoFormat ?? "source";
+  const nothing = !s.saveVideo && !s.saveAudio && !s.saveVoice && !s.saveSubs;
+  // своё для этого видео — подсвечена подпись «Сохранить» и есть «Сбросить»; как в настройках — ничего лишнего
+  row.classList.toggle("own", Boolean(card.save));
+  label.title = card.save ? "Для этого видео выбрано своё — не как в настройках справа"
+    : "Как в настройках справа. Нажмите на пункт, чтобы поменять только для этого видео";
+  warn.hidden = !nothing;
+  reset.hidden = !card.save;
+  lockSave(card);
+}
+
+/** Сохранение уже идёт — менять поздно (после него снова можно: для «Пересобрать видео»). */
+function lockSave(card) {
+  if (!card.saveEls) return;
+  const save = card.steps.save;
+  const saving = card.state === "running" && (save.classList.contains("active") || save.classList.contains("done"));
+  const s = effectiveSave(card);
+  for (const b of card.saveEls.opts) b.disabled = saving || (b.dataset.key === "embedSubs" && !s.saveVideo);
+  card.saveEls.format.disabled = saving || !s.saveVideo;
+  card.saveEls.reset.disabled = saving;
+  card.saveEls.row.title = saving ? "Видео уже сохраняется — поменять можно будет после, для «Пересобрать видео»" : "";
 }
 
 /**
@@ -391,6 +453,7 @@ function updateStep(card, { step, state, progress, detail }) {
     bar.firstElementChild.style.width = `${Math.round(progress * 100)}%`;
   }
   if (state && state !== "active") bar.hidden = true;
+  if (step === "save" && state) lockSave(card);
 }
 
 /** Все файлы видео (главный процесс присылает полный список: прежняя версия могла уйти в Корзину). */
@@ -427,6 +490,17 @@ api.on("job:update", (u) => {
   applyUpdate(card, u);
 });
 
+// шапка очереди пересчитывается один раз за кадр, сколько бы событий ни пришло
+let countQueued = false;
+function updateCount() {
+  if (countQueued) return;
+  countQueued = true;
+  requestAnimationFrame(() => {
+    countQueued = false;
+    renderCount();
+  });
+}
+
 function applyUpdate(card, u) {
   if (u.reset) resetSteps(card);
   if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
@@ -450,9 +524,16 @@ function applyUpdate(card, u) {
 }
 
 /** Шапка очереди: сколько видео и в каком они состоянии, полоса готовности, какие кнопки нужны. */
-function updateCount() {
+let lastCount = "";
+function renderCount() {
   const list = [...cards.values()];
-  const count = (...states) => list.filter((c) => states.includes(c.state)).length;
+  const by = {};
+  for (const c of list) by[c.state] = (by[c.state] ?? 0) + 1;
+  const count = (...states) => states.reduce((n, st) => n + (by[st] ?? 0), 0);
+  // ничего не поменялось (идёт только прогресс внутри шагов) — шапку не трогаем
+  const key = JSON.stringify(by);
+  if (key === lastCount) return;
+  lastCount = key;
   const total = list.length;
   const done = count("done");
   const parts = [
@@ -624,6 +705,7 @@ async function initSettings() {
     $("originalVolume").append(opt);
   }
   const s = await api.getSettings();
+  for (const k of SAVE_KEYS) saveDefaults[k] = s[k];
   for (const el of document.querySelectorAll("[data-setting]")) {
     const key = el.dataset.setting;
     if (el.type === "checkbox") el.checked = Boolean(s[key]);
@@ -633,6 +715,10 @@ async function initSettings() {
       const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
       syncDependent();
+      if (SAVE_KEYS.includes(key)) {
+        saveDefaults[key] = value;
+        for (const card of cards.values()) if (!card.save) renderSave(card);
+      }
     });
     if (el.type === "range") el.addEventListener("input", syncDependent);
   }
@@ -676,6 +762,10 @@ $("pickFolder").onclick = async () => {
   if (dir) renderFolder((await api.setSettings({ outputDir: dir })).outputDir);
 };
 $("resetFolder").onclick = async () => renderFolder((await api.setSettings({ outputDir: "" })).outputDir);
+
+// шапка очереди прилипла к верху (список прокручен) — тень снизу, чтобы отделить её от карточек
+new IntersectionObserver(([e]) => $("queueBar").classList.toggle("stuck", !e.isIntersecting && cards.size > 0),
+  { root: document.querySelector(".work") }).observe($("queueSentinel"));
 
 // ---------- старт ----------
 const info = await api.info();
