@@ -102,8 +102,9 @@ Settings, the Yandex sign-in and the log are kept when updating.
 
 1. Press **«Войти через Яндекс»** (Sign in with Yandex), open the Yandex page, enter the code from the app and allow access.
 2. Drag videos (or a whole folder) into the app window.
-3. Choose the video language and voices, reorder the queue and press **«Запустить все»** (Start all)
-   (how many videos to translate at once — in the settings, «Очередь» section).
+3. In the video card, check the **original language** (the language spoken in the video), the voices and what
+   to save, reorder the queue and press **«Запустить все»** (Start all). Defaults live in the right-hand
+   «Настройки по умолчанию» (Default settings) panel — including how many videos to translate at once («Очередь»).
 4. When the translation is ready, listen to a fragment right in the video card and adjust the volume if you
    like — **«Сохранить с этим звуком»** (Save with this sound) rebuilds the file in seconds.
 
