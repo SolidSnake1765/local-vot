@@ -52,8 +52,16 @@ async function launch(dir, port, env = {}) {
     ws.send(JSON.stringify({ id: n, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } }));
   });
   const waitExit = async (ms) => { for (let i = 0; i < ms / 250 && !state.exited; i++) await sleep(250); return state.exited; };
+  // ждать, пока выражение в окне не станет истинным (сервер сборки бывает в разы медленнее — не «на глаз»)
+  const waitFor = async (expression, ms = 30_000) => {
+    for (let i = 0; i < ms / 250; i++) {
+      if (await evaluate(expression)) return true;
+      await sleep(250);
+    }
+    return false;
+  };
   return {
-    evaluate, state, waitExit,
+    evaluate, state, waitExit, waitFor,
     // как крестик окна: Windows шлёт окну «закрыть»
     close: async () => { ws.close(); spawn("taskkill", ["/PID", String(app.pid)], { stdio: "ignore" }); return waitExit(30_000); },
     kill: () => { try { ws.close(); } catch { /* уже закрыт */ } app.kill(); },
@@ -92,7 +100,9 @@ test("список видео между запусками: восстанов�
 
   const app = await launch(dir, 9351);
   try {
-    await sleep(4000);
+    // список на месте и недоделанное уже отработало (без входа — ошибкой)
+    await app.waitFor(`document.querySelectorAll(".job").length === 4
+      && document.querySelector('.job[data-id="${id(4)}"]')?.dataset.state === "error"`);
     const cards = await app.evaluate(cardsJs);
     assert.deepEqual(cards.map((c) => c.id), [id(3), id(1), id(4), id(2)], "порядок");
     const [idle, done, resumed, failed] = cards;
@@ -125,10 +135,10 @@ test("выключить компьютер после очереди: отсч�
     writeFileSync(path.join(dir, "profile", "settings.json"), JSON.stringify({ keepQueue: true }));
     const app = await launch(dir, cancel ? 9352 : 9353, { LOCAL_VOT_DRY_SHUTDOWN: "1", LOCAL_VOT_SHUTDOWN_SECONDS: "3" });
     try {
-      await sleep(2500);
+      await app.waitFor(`Boolean(document.querySelector(".job-start")) && !document.querySelector(".job-start").hidden`);
       await app.evaluate(`document.getElementById("shutdownAfter").click()`);
       await app.evaluate(`document.querySelector(".job-start").click()`);
-      await sleep(1500);
+      await app.waitFor(`!document.getElementById("askModal").hidden`);
       const title = await app.evaluate(`document.getElementById("askModal").hidden ? "" : document.getElementById("askTitle").textContent`);
       assert.equal(title, "Выключение компьютера");
       assert.equal(await app.evaluate(`document.getElementById("shutdownAfter").checked`), false, "галочка — один раз");
