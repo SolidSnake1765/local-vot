@@ -17,7 +17,7 @@ import { loadSettings } from "./config.js";
 // При «по одному» — всё строго по одному видео (для слабых компьютеров и обычных жёстких дисков: там диск
 // мечется между многогигабайтными файлами, и вместе выходит медленнее, чем по очереди). Копия при этом
 // идёт раньше сборки: она отправляет видео в Яндекс, где перевод ждёт минутами, — пусть ждёт пораньше.
-export const diskJobsLimit = () => Math.min(4, Math.max(1, Number(loadSettings().diskJobs) || 1));
+export const diskJobsLimit = () => Math.min(8, Math.max(1, Number(loadSettings().diskJobs) || 1));
 const diskTurn = workPool((kind, busy) => {
   const n = diskJobsLimit();
   return n <= 1 ? !busy.light && !busy.save : (busy[kind] ?? 0) < n;

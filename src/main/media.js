@@ -290,6 +290,7 @@ const FRAME = 1024;
 const CHUNK_PAD = 64;
 const PARALLEL_MIN_SEC = 180; // короче — одним процессом: выигрыш меньше, чем запуск десятка ffmpeg
 const CORES = Math.max(1, os.availableParallelism?.() ?? os.cpus().length);
+let encoding = 0; // сколько encodeAac идёт кусками прямо сейчас
 
 /**
  * Отрезки по кадрам: [from, to) — свои, последний открыт до конца. Последующие куски сначала проходят граф
@@ -338,7 +339,9 @@ function adtsPackets(buf) {
 async function encodeAac(inputs, graph, out, { kbps, fast = false, duration, onProgress, signal, after = [] }) {
   const codec = ["-c:a", "aac", "-b:a", `${kbps}k`, ...(fast ? ["-aac_coder", "fast"] : [])];
   if (!graph.endsWith("[mix]")) throw new Error("encodeAac: граф должен кончаться выходом [mix]");
-  const n = Math.min(16, CORES - 1);
+  // ядра делятся между видео, которые кодируются одновременно («Копия и сборка» — до 8): иначе 8 видео
+  // запустили бы по 16 ffmpeg — 128 процессов, памяти много, а быстрее не станет
+  const n = Math.min(16, Math.floor((CORES - 1) / (encoding + 1)));
   if (!(duration >= PARALLEL_MIN_SEC) || n < 2) {
     await withFilterScript(graph, (script) => ffmpeg(["-v", "error", "-stats", ...inputs, FILTER_SCRIPT_FLAG, script,
       "-map", "[mix]", ...codec, "-movflags", "+faststart", ...after, out], { duration, onProgress, signal }));
@@ -358,6 +361,7 @@ async function encodeAac(inputs, graph, out, { kbps, fast = false, duration, onP
     shown = Math.max(shown, done.reduce((a, b) => a + b, 0) / chunks.length);
     onProgress?.(shown);
   };
+  encoding++;
   try {
     await Promise.all(chunks.map(async ([from, to], i) => {
       const a = Math.max(0, from - CHUNK_PAD); // с какого кадра кусок кодирует (с запасом)
@@ -387,6 +391,7 @@ async function encodeAac(inputs, graph, out, { kbps, fast = false, duration, onP
   } catch (e) {
     throw signal?.aborted ? new Error("Отменено") : e;
   } finally {
+    encoding--;
     signal?.removeEventListener("abort", onAbort);
     for (const f of [...files, joined]) dropTemp(f);
   }
