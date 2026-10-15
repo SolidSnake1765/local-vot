@@ -1,10 +1,24 @@
 // Работа с видео через ffmpeg (своя сборка — scripts/build-ffmpeg.sh; если её нет — системный).
-import { spawn } from "node:child_process";
+import { spawn as spawnProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * ffmpeg — с приоритетом «ниже среднего»: кодирование занимает все ядра, и с обычным приоритетом окно программы
+ * (и всё остальное на компьютере) получало долю наравне с десятками ffmpeg — подвисало секунд на 10–15.
+ * Свободные ядра ffmpeg так же забирает целиком, просто уступает их окну по первому требованию.
+ */
+function spawn(cmd, args, opts) {
+  const p = spawnProcess(cmd, args, opts);
+  if (p.pid) {
+    try { os.setPriority(p.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* уже завершился */ }
+  }
+  return p;
+}
+export const spawnBelowNormal = spawn; // для проверки (tests/media.test.mjs)
 
 // Своя сборка ffmpeg (scripts/build-ffmpeg.sh): при разработке — vendor/ffmpeg в папке проекта, в собранной
 // программе — resources/ffmpeg (extraResources в package.json; этот файл там — resources/app.asar/src/main).

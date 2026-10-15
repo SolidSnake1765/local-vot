@@ -67,6 +67,17 @@ const voice = wav(path.join(dir, "voice.wav"), 24000, 1, VOICE_AT);
 const opts = (extra) => ({ voiceGain: 1, originalVolume: 100, mixMode: "duck", autoLevel: false,
   origInfo: { codec: "aac", kbps: 256, channels: 2 }, ...extra });
 
+test("ffmpeg — с приоритетом ниже обычного: окно программы не подвисает, пока кодирование занимает все ядра", { skip }, async () => {
+  const exe = FFMPEG.pathname.replace(/^\/(\w:)/, "$1").replaceAll("%20", " ");
+  const p = media.spawnBelowNormal(exe, ["-hide_banner", "-nostdin", "-f", "lavfi", "-i", "anullsrc", "-t", "60", "-f", "null", "-"],
+    { windowsHide: true });
+  try {
+    assert.equal(os.getPriority(p.pid), os.constants.priority.PRIORITY_BELOW_NORMAL);
+  } finally {
+    p.kill();
+  }
+});
+
 test("дорожка с переводом кусками на всех ядрах: всё на месте, стыков не слышно", { skip }, async () => {
   const analysis = await media.analyzeVoice(voice);
   assert.equal(analysis.segments.length, VOICE_AT.length, "фразы перевода найдены");
