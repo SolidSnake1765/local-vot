@@ -1,10 +1,79 @@
-// Ограничитель одновременной работы (семафор): не больше n задач сразу, остальные ждут.
-// Нужен, когда видео переводятся параллельно: загрузка и ожидание Яндекса идут вместе, а чтение
-// многогигабайтного исходника и запись результата — по одному, иначе диск мечется между файлами
-// и всё идёт медленнее, чем по очереди.
+// Ограничители одновременной работы: не больше n задач сразу (limiter) или по правилу для работ
+// разных видов (workPool — очередь к диску у облегчённой копии и сборки, см. pipeline.js); остальные ждут.
 //
 // Кого пустить, когда место освободилось: ожидающего с меньшим priority() (у видео — место в списке,
 // чтобы там, где это ничего не стоит, работа шла в порядке списка); при равенстве — кто раньше встал.
+
+/**
+ * Очередь к общему ресурсу для работ разных видов (у диска — облегчённая копия и сборка видео).
+ * fits(kind, busy) решает, можно ли начать ещё одну работу вида kind, когда уже идут busy = { вид: сколько };
+ * правило может зависеть от настроек — после их смены вызвать wake(). Из ожидающих, кому уже можно,
+ * первым идёт вид с меньшим rank, затем меньший priority(), затем кто раньше встал.
+ * @returns { acquire(kind, signal?, priority?): Promise<release> & { granted }, wake() }
+ */
+export function workPool(fits, rank = {}) {
+  const busy = {};
+  const waiting = []; // { kind, go, priority: () => number, seq }
+  let seq = 0;
+
+  const before = (a, b) => {
+    const ra = rank[a.kind] ?? 0, rb = rank[b.kind] ?? 0;
+    if (ra !== rb) return ra < rb;
+    const pa = a.priority(), pb = b.priority();
+    if (pa !== pb) return pa < pb;
+    return a.seq < b.seq;
+  };
+
+  function wake() {
+    for (;;) {
+      let best = -1;
+      for (let i = 0; i < waiting.length; i++) {
+        if (fits(waiting[i].kind, busy) && (best < 0 || before(waiting[i], waiting[best]))) best = i;
+      }
+      if (best < 0) return;
+      const [entry] = waiting.splice(best, 1);
+      busy[entry.kind] = (busy[entry.kind] ?? 0) + 1;
+      entry.go();
+    }
+  }
+
+  return {
+    wake,
+    /**
+     * Ждёт, пока работе этого вида можно начаться; отмена (signal) снимает из ожидания. priority — число
+     * или функция (меньше — раньше). Возвращает «освободить»; у промиса granted = true, когда место дали.
+     */
+    acquire(kind, signal, priority = Infinity) {
+      if (signal?.aborted) return Object.assign(Promise.reject(new Error("Отменено")), { granted: false });
+      const getPriority = typeof priority === "function" ? priority : () => priority;
+      const entry = { kind, seq: seq++, priority: () => { const p = getPriority(); return Number.isFinite(p) ? p : Infinity; } };
+      let ticket;
+      const promise = new Promise((resolve, reject) => {
+        const onAbort = () => {
+          const i = waiting.indexOf(entry);
+          if (i >= 0) waiting.splice(i, 1);
+          reject(new Error("Отменено"));
+        };
+        entry.go = () => {
+          ticket.granted = true;
+          signal?.removeEventListener("abort", onAbort);
+          let done = false;
+          resolve(() => {
+            if (done) return; // повторный вызов ничего не ломает
+            done = true;
+            busy[kind]--;
+            wake();
+          });
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      ticket = Object.assign(promise, { granted: false });
+      waiting.push(entry);
+      wake();
+      return ticket;
+    },
+  };
+}
 
 /** @returns { acquire(signal?, priority?): Promise<release>, busy(): boolean } */
 export function limiter(n = 1) {

@@ -8,7 +8,7 @@ import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindow
 import * as disk from "./yadisk.js";
 import { readFileSync, rmSync } from "node:fs";
 import { readdir, rename, rm, stat } from "node:fs/promises";
-import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir } from "./pipeline.js";
+import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir, wakeDiskTurn } from "./pipeline.js";
 import { grabFrame, probe, renderPreview, setTempDir } from "./media.js";
 import { limiter } from "./limit.js";
 import { stopThumbHelper, windowsThumb } from "./thumbs.js";
@@ -37,7 +37,7 @@ const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts"
 let win = null;
 const send = (channel, payload) => win?.webContents.send(channel, payload);
 
-// ---------- очередь: до parallelJobs видео одновременно, работа с диском — по одному (см. pipeline.js) ----------
+// ---------- очередь: до parallelJobs видео одновременно, копия и сборка — по настройке diskJobs (см. pipeline.js) ----------
 // job: { id, file, name, state, controller, lively, lang, diskPath, duration, voiceUsed, langUsed, outputs, replace }
 // outputs — файлы, сохранённые для этого видео; replace — новая версия заменяет их (прежние — в Корзину)
 // diskPath — закрытая копия на Диске: держим, пока видео в списке, чтобы переводить заново без загрузки
@@ -48,6 +48,8 @@ let jobCounter = 0; // номер видео в журнале: «видео #3�
 let order = [];
 // видео, которые переводятся прямо сейчас: id → промис (при выходе ждём, пока они закроют ссылки)
 const running = new Map();
+// из них — занявшие место в «Одновременно переводить» (копия, загрузка, перевод); собирающиеся его уже отдали
+const slots = new Set();
 // итог текущей «пачки» — для уведомления, когда очередь закончится
 let batch = { done: 0, failed: 0 };
 
@@ -105,12 +107,14 @@ const neverRan = (job) => !job.translation && !job.diskPath && !job.outputs?.len
 const parallelLimit = () => Math.min(8, Math.max(1, Number(loadSettings().parallelJobs) || 1));
 
 /**
- * Запускает видео из очереди, пока есть свободные места. Загрузка и перевод идут параллельно;
- * чтение исходника и сохранение pipeline сам пускает по одному (очередь на диск).
+ * Запускает видео из очереди, пока есть свободные места. Место занято от облегчённой копии до получения
+ * перевода; сборку видео ждёт и делает уже без места. Копию и сборку pipeline пускает к диску по настройке
+ * «Копия и сборка».
  */
 function pump() {
-  while (running.size < parallelLimit() && queue.length) {
+  while (slots.size < parallelLimit() && queue.length) {
     const job = queue.shift();
+    slots.add(job.id);
     running.set(job.id, runOne(job));
   }
 }
@@ -141,7 +145,8 @@ async function runOne(job) {
       return options;
     };
     progress = progressSender(job.id);
-    const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition }, (patch) => {
+    const freeSlot = () => { if (slots.delete(job.id)) pump(); };
+    const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
       progress.push(patch);
     }, job.controller.signal);
@@ -179,6 +184,7 @@ async function runOne(job) {
     lightTurn?.then((release) => release(), () => {}); // не дошли до копии (ошибка, отмена) — место отдаём
     job.mode = "translate";
     running.delete(job.id);
+    slots.delete(job.id);
     pump();
     // очередь закончилась — одно общее уведомление, если видео было больше одного
     if (!running.size && !queue.length) {
@@ -600,6 +606,7 @@ ipcMain.handle("settings:set", (_e, patch) => {
   if (patch?.outputDir) hide(patch.outputDir, "<папка сохранения>");
   const next = saveSettings(patch);
   if (patch && "parallelJobs" in patch) pump();
+  if (patch && "diskJobs" in patch) wakeDiskTurn();
   return next;
 });
 // ошибки окна (интерфейса) — в тот же журнал

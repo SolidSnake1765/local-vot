@@ -119,7 +119,14 @@
         <span>Одновременно переводить</span>
         <select data-setting="parallelJobs" data-type="number" id="parallelJobs"></select>
       </label>
-      <p class="note tight">Загрузка и перевод идут параллельно, а чтение видео с диска и сохранение — по одному, чтобы диск не тормозил.</p>
+      <p class="note tight">Сколько видео сразу отправляются в Яндекс и переводятся. Готовое видео отдаёт место
+        следующему, не дожидаясь своей сборки.</p>
+      <label class="select">
+        <span>Копия и сборка</span>
+        <select data-setting="diskJobs" data-type="number" id="diskJobs"></select>
+      </label>
+      <p class="note tight">Сколько видео сразу делают облегчённую копию и сколько сразу собираются после
+        перевода. Слабый компьютер или обычный жёсткий диск (HDD) — выберите «по одному».</p>
       <div class="check-row">
         <label class="check"><input type="checkbox" data-setting="notifications"> Уведомления Windows</label>
         <button class="link-btn inline" id="testNotification" type="button" title="Показать тестовое уведомление прямо сейчас">Проверить</button>

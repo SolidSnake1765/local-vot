@@ -698,6 +698,12 @@ async function initSettings() {
     opt.textContent = n === 1 ? "1 видео — по очереди" : `${n} видео`;
     $("parallelJobs").append(opt);
   }
+  for (const n of [1, 2, 3, 4]) {
+    const opt = document.createElement("option");
+    opt.value = String(n);
+    opt.textContent = n === 1 ? "По одному — для слабых ПК и HDD" : `По ${n} видео сразу`;
+    $("diskJobs").append(opt);
+  }
   for (let v = 0; v <= 100; v += 10) {
     const opt = document.createElement("option");
     opt.value = String(v);

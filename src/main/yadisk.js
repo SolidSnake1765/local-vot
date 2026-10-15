@@ -39,8 +39,22 @@ async function api(token, method, endpoint, params = {}, signal, extraHeaders = 
     log.warn("Диск", `${method} ${endpoint}: ответ ${res.status}`, data.message ?? data.error ?? text.slice(0, 300));
     if (res.status === 401) throw new Error("Вход в Яндекс устарел — войдите заново");
     if (res.status === 507) throw new Error("На Яндекс Диске не хватает места");
+    if (res.status === 423) throw uploadLimitError();
     throw new Error(`Диск: ${data.message ?? data.error ?? text} (${res.status})`);
   }
+}
+
+/**
+ * 423 — Диск только для просмотра: обычно исчерпан месячный лимит загрузки (UPLOAD_TRAFFIC_LIMIT_EXCEEDED:
+ * за 30 дней с первой загрузки — не больше двух объёмов Диска, на бесплатных 5 ГБ — 10 ГБ), реже — техработы.
+ * code — чтобы pipeline не делал зря копии остальных видео очереди.
+ */
+function uploadLimitError() {
+  return Object.assign(new Error("Яндекс Диск сейчас не принимает загрузки: скорее всего, исчерпан месячный лимит "
+    + "загрузки этого аккаунта (за 30 дней можно загрузить не больше двух объёмов Диска — на бесплатных 5 ГБ это "
+    + "10 ГБ, примерно 40 двухчасовых видео). Лимит обновится через 30 дней после первой загрузки. Можно войти "
+    + "в другой аккаунт Яндекса (кнопка «Выйти» вверху) или увеличить место на Диске — и нажать «Попробовать снова»."),
+  { code: "UPLOAD_LIMIT" });
 }
 
 /** Отправляет файл по адресу загрузки с отслеживанием прогресса. */
@@ -50,9 +64,16 @@ function putFile(href, file, onProgress, signal) {
     const req = https.request(href, { method: "PUT", headers: { "Content-Length": size }, signal }, (res) => {
       let body = "";
       res.on("data", (d) => { body += d; });
-      res.on("end", () => (res.statusCode < 300
-        ? resolve()
-        : reject(new Error(`Диск: загрузка не удалась (${res.statusCode}) ${body}`))));
+      res.on("end", () => {
+        if (res.statusCode < 300) return resolve();
+        if (res.statusCode === 423) return reject(uploadLimitError());
+        if (res.statusCode === 413) {
+          return reject(new Error("Облегчённая копия этого видео больше, чем тариф Яндекс Диска разрешает загружать "
+            + "одним файлом (на бесплатном — 1 ГБ). Такое бывает у очень длинных видео."));
+        }
+        if (res.statusCode === 507) return reject(new Error("На Яндекс Диске не хватает места"));
+        reject(new Error(`Диск: загрузка не удалась (${res.statusCode}) ${body}`));
+      });
     });
     req.on("error", (e) => reject(signal?.aborted ? new Error("Отменено") : e));
     let sent = 0;

@@ -15,8 +15,7 @@
   "license": "MIT",
   "dependencies": {
     "@vot.js/core": "^3.1.5",
-    "@vot.js/node": "^3.1.5",
-    "ffmpeg-static": "^5.2.0"
+    "@vot.js/node": "^3.1.5"
   },
   "devDependencies": {
     "electron": "^44.4.5",
@@ -39,9 +38,6 @@
       "src/**/*",
       "assets/**/*",
       "package.json"
-    ],
-    "asarUnpack": [
-      "node_modules/ffmpeg-static/**"
     ],
     "win": {
       "icon": "assets/icon-512.png",
@@ -77,6 +73,10 @@
       {
         "from": "assets/icon-512.png",
         "to": "icon.png"
+      },
+      {
+        "from": "vendor/ffmpeg",
+        "to": "ffmpeg"
       }
     ]
   }

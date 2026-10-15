@@ -335,7 +335,8 @@ option { background: var(--surface); }
 .note.tight { margin: 2px 0 0 26px; }
 
 /* ---------- окно входа ---------- */
-.modal { position: fixed; inset: 0; background: rgba(5, 8, 16, .6); backdrop-filter: blur(6px); display: grid; place-items: center; }
+/* z-index — выше всего, что лежит на своём слое (прилипающая шапка очереди — 5) */
+.modal { position: fixed; inset: 0; z-index: 100; background: rgba(5, 8, 16, .6); backdrop-filter: blur(6px); display: grid; place-items: center; }
 .modal[hidden] { display: none; }
 .modal-card {
   width: min(420px, 90vw); background: var(--surface); border: 1px solid var(--border); border-radius: 18px;

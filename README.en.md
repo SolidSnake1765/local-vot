@@ -54,8 +54,9 @@ add a video, press "Start", get the translated video.
 - **Queue** — add whole folders, reorder by drag-and-drop, press "Start all". Already translated videos are skipped.
   Video thumbnails like in Windows Explorer and a "Show in folder" button; progress counter and overall bar (stays
   visible while you scroll the list), "Cancel all", "Clear". Stays smooth even with a hundred videos.
-- **Several videos at once** — up to 8: upload and translation run in parallel, while reading videos from disk and
-  saving go one at a time so the disk doesn't slow down.
+- **Several videos at once** — up to 8 translated by Yandex simultaneously; preparing light copies and assembling
+  finished videos also run in parallel without waiting for each other, so new videos head to Yandex while others
+  are being assembled. A "one at a time" mode is there for slow PCs and hard drives (HDD).
 - **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.
 - **16 formats**: MP4, MKV, MOV, AVI, WebM, M4V, WMV, FLV, TS, MPG, MPEG, M2TS, MTS, 3GP, VOB, OGV.
   The result is saved in the same format as the source (or always MKV — your choice).
@@ -79,7 +80,7 @@ Download from the [latest release](https://github.com/SolidSnake1765/local-vot/r
 | `Local-VOT-…-portable.zip` | **Portable** — unpack anywhere (even to a USB stick) and run `Local VOT.exe`. All settings and temporary files stay in its own `data` folder; nothing is left in the system. |
 
 **Requirements:** Windows 10 or 11 (64-bit; works on Windows ARM through built-in emulation), internet,
-a Yandex account. A little Disk space is needed — up to ~2 MB per minute of video while the video is in the list
+a Yandex account. A little Disk space is needed — up to ~1 MB per minute of video while the video is in the list
 (if it runs out, the app removes the Disk copies of already finished videos).
 
 > [!NOTE]
@@ -140,9 +141,9 @@ npm run dist                # installer and portable version in the dist folder
 ## Built with
 
 - [vot.js](https://github.com/FOSWLY/vot.js) — Yandex translator client (MIT).
-- [ffmpeg](https://ffmpeg.org) via [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) — audio and video
-  (ffmpeg is distributed under the GPL; its license text is in the app folder:
-  `resources\app.asar.unpacked\node_modules\ffmpeg-static`).
+- [ffmpeg](https://ffmpeg.org) 9.0.2 — audio and video. A slim custom build with only what the app needs; see
+  [`scripts/build-ffmpeg.sh`](scripts/build-ffmpeg.sh). ffmpeg is distributed under the GPL v3; its license text and
+  where the sources come from are in the app folder `resources\ffmpeg`.
 - [Electron](https://www.electronjs.org) — app shell.
 
 ## License

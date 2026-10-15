@@ -1,16 +1,19 @@
-// Работа с видео через ffmpeg (встроенный ffmpeg-static; если его нет — системный).
+// Работа с видео через ffmpeg (своя сборка — scripts/build-ffmpeg.sh; если её нет — системный).
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
-import ffmpegStatic from "ffmpeg-static";
+import { fileURLToPath } from "node:url";
 
-// в собранном приложении бинарник лежит вне архива app.asar
-const bundled = ffmpegStatic?.replace("app.asar", "app.asar.unpacked");
-const FFMPEG = bundled && existsSync(bundled) ? bundled : "ffmpeg";
-// длинный граф фильтров (сотни фраз) не влезает в командную строку Windows — отдаём файлом;
-// встроенный ffmpeg 6.1 понимает -filter_complex_script, системный 7+ — «-/filter_complex»
-const FILTER_SCRIPT_FLAG = FFMPEG === "ffmpeg" ? "-/filter_complex" : "-filter_complex_script";
+// Своя сборка ffmpeg (scripts/build-ffmpeg.sh): при разработке — vendor/ffmpeg в папке проекта, в собранной
+// программе — resources/ffmpeg (extraResources в package.json; этот файл там — resources/app.asar/src/main).
+// Нет её — системный ffmpeg (7 или новее).
+const here = path.dirname(fileURLToPath(import.meta.url));
+const FFMPEG = [path.join(here, "..", "..", "vendor", "ffmpeg", "ffmpeg.exe"), path.join(here, "..", "..", "..", "ffmpeg", "ffmpeg.exe")]
+  .find((p) => existsSync(p)) ?? "ffmpeg";
+// длинный граф фильтров (сотни фраз) не влезает в командную строку Windows — отдаём файлом (синтаксис ffmpeg 7+)
+const FILTER_SCRIPT_FLAG = "-/filter_complex";
 
 const RAMP = 0.2; // плавность приглушения оригинала, с
 
@@ -22,6 +25,11 @@ function tempFile(name) {
   mkdirSync(tempDir, { recursive: true });
   return path.join(tempDir, name);
 }
+/**
+ * Убрать временный файл, не дожидаясь и не падая: только что записанный файл Windows (антивирус) иногда
+ * держит долю секунды — повторяем; не вышло — папку программы всё равно чистят при выходе.
+ */
+const dropTemp = (f) => rm(f, { force: true, recursive: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
 
 function ffmpeg(args, { duration, onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -40,7 +48,10 @@ function ffmpeg(args, { duration, onProgress, signal } = {}) {
       signal?.removeEventListener("abort", onAbort);
       if (signal?.aborted) reject(new Error("Отменено"));
       else if (code === 0) resolve();
-      else reject(new Error(`ffmpeg: ${log.split("\n").map((l) => l.trim()).filter(Boolean).slice(-2).join(" · ")}`));
+      else {
+        const tail = log.split("\n").map((l) => l.trim()).filter(Boolean).slice(-2).join(" · ");
+        reject(new Error(`ffmpeg: ${tail || `завершился с кодом ${code} без сообщения`}`));
+      }
     });
   });
 }
@@ -100,8 +111,8 @@ export async function probe(file) {
 
 /**
  * На сколько звук начинается позже начала файла, с. У TS/M2TS это десятки мс, у MKV с задержкой звука —
- * бывает и сотни. Копия звука (makeLight → origOut) эту задержку теряет — при сведении её возвращаем,
- * чтобы оригинал в дорожке перевода стоял там же, где при сборке прямо из видео. Читает только начало файла.
+ * бывает и сотни. Копия звука (makeLight → origOut) эту задержку теряет — при сведении и в облегчённой копии
+ * её возвращаем явно, до сэмпла (shift), чтобы оригинал стоял там же, где в видео. Читает только начало файла.
  * @param start — начало файла из probe()
  */
 export async function audioOffset(file, start) {
@@ -119,10 +130,6 @@ export async function audioOffset(file, start) {
   const offset = (Number(frame[1]) * Number(tb[1])) / Number(tb[2]) - start;
   return Math.abs(offset) < 0.001 ? 0 : offset;
 }
-
-/** Аргументы входа «звук оригинала»: копия звука со своей задержкой или само видео. */
-const origInput = (src) => (typeof src === "string" ? ["-i", src]
-  : [...(src.offset ? ["-itsoffset", src.offset.toFixed(4)] : []), "-i", src.path]);
 
 // ---------- формат итогового видео ----------
 // Картинка всегда копируется как есть; звук перевода кодируется тем, что принимает контейнер;
@@ -205,24 +212,184 @@ export const mkvPlan = (reason) => ({ ext: "mkv", ...CONTAINERS.mkv, origCodec: 
  * Диск видит её как видео (vot.js требует mediatype=video), весит она как аудио, картинка никуда не уходит.
  * -t по длительности исходника: -shortest с 1 fps промахивается на десятки секунд.
  *
- * Звук AAC моно/стерео кладём как есть (copyAudio): пережатие 40-мин звука — ~40 с на одном ядре,
- * а качество для переводчика только лучше. Заодно за то же чтение исходника сохраняем его звук
- * без изменений (origOut) — сборка дорожки и прослушивание потом не читают гигабайты видео.
- * Если пережимать всё же надо — с битрейтом не хуже оригинала (audio — сведения о нём из probe).
+ * Звук в копии — только для Яндекса (распознать речь, услышать голоса для живых), поэтому он сжат:
+ * AAC 96 кбит/с стерео (64 — моно), быстрый режим кодировщика. Копия в 2,5 раза легче, чем со звуком
+ * как есть (2 ч видео со звуком 256 кбит/с — ~85 МБ вместо ~210), а это месячный лимит загрузки Диска
+ * (на бесплатном — 10 ГБ) и время загрузки; сжатие — ~10 с на 20 мин звука. Звук уже не толще этого
+ * (AAC моно/стерео, copyAudio) — кладём как есть. Итог от этого не страдает: за то же чтение исходника
+ * сохраняем его звук без изменений (origOut) — из него собираются дорожка и видео, по нему меряется
+ * громкость, его слушает прослушивание, и гигабайты видео потом не читаются заново.
  */
-export function makeLight(input, out, duration, onProgress, signal,
-  { copyAudio = false, origOut = null, audio = {}, fast = false } = {}) {
-  return ffmpeg([
-    "-v", "error", "-stats", "-t", String(duration),
-    "-f", "lavfi", "-i", "color=c=black:s=256x144:r=1",
-    "-i", input,
-    "-map", "0:v", "-map", "1:a:0",
-    "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-crf", "40",
-    ...(copyAudio ? ["-c:a", "copy"] : audioArgs(":a", "aac", audio, { multi: audio.channels > 2, fast })),
-    "-shortest", "-movflags", "+faststart",
-    out,
-    ...(origOut ? ["-map", "1:a:0", "-c", "copy", origOut] : []),
-  ], { duration, onProgress, signal });
+export const LIGHT_KBPS = { 1: 64, 2: 96 };
+const BLACK = ["-f", "lavfi", "-i", "color=c=black:s=256x144:r=1"];
+const BLACK_CODEC = ["-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-crf", "40"];
+/**
+ * Сжатие делается на всех ядрах (encodeAac) из копии звука origOut, уже после чтения исходника: так чтение
+ * многогигабайтного видео не ждёт кодировщик на одном ядре. origOffset — на сколько звук начинается позже
+ * начала видео (audioOffset): копия звука эту задержку теряет, в облегчённой копии она возвращается.
+ */
+export async function makeLight(input, out, duration, onProgress, signal,
+  { copyAudio = false, origOut = null, audio = {}, origOffset = 0 } = {}) {
+  const channels = audio.channels === 1 ? 1 : 2;
+  const keep = copyAudio && audio.kbps && audio.kbps <= LIGHT_KBPS[channels] + 32;
+  if (keep || !origOut) {
+    await ffmpeg([
+      "-v", "error", "-stats", "-t", String(duration), ...BLACK,
+      "-i", input,
+      "-map", "0:v", "-map", "1:a:0", ...BLACK_CODEC,
+      ...(keep ? ["-c:a", "copy"]
+        : ["-c:a", "aac", "-b:a", `${LIGHT_KBPS[channels]}k`, "-ac", String(channels), "-aac_coder", "fast"]),
+      "-shortest", "-movflags", "+faststart",
+      out,
+      ...(origOut ? ["-map", "1:a:0", "-c", "copy", origOut] : []),
+    ], { duration, onProgress, signal });
+    return;
+  }
+  const tag = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const picture = tempFile(`light-${tag}.mp4`);
+  const sound = tempFile(`light-${tag}.m4a`);
+  try {
+    // одно чтение исходника: чёрная картинка и звук оригинала как есть (это почти всё время копии)
+    await ffmpeg([
+      "-v", "error", "-stats", "-t", String(duration), ...BLACK,
+      "-i", input,
+      "-map", "0:v", ...BLACK_CODEC, "-an", picture,
+      "-map", "1:a:0", "-c", "copy", origOut,
+    ], { duration, onProgress: (p) => onProgress?.(p * 0.9), signal });
+    await encodeAac(["-i", origOut],
+      `[0:a:0]asetpts=N/SR/TB,aresample=${RATE},aformat=channel_layouts=${channels === 1 ? "mono" : "stereo"}${shift(origOffset)}[mix]`,
+      sound, { kbps: LIGHT_KBPS[channels], fast: true, duration, onProgress: (p) => onProgress?.(0.9 + p * 0.1), signal });
+    await ffmpeg(["-v", "error", "-i", picture, "-i", sound, "-map", "0:v", "-map", "1:a", "-c", "copy", "-movflags", "+faststart", out],
+      { signal });
+  } finally {
+    dropTemp(picture);
+    dropTemp(sound);
+  }
+}
+
+const RATE = 48000; // звук дорожек и копий — 48 кГц: так кадры AAC (1024 сэмпла) у кусков encodeAac совпадают
+/** Задержка звука на offset с (отрицательная — обрезать начало) — точно до сэмпла, после aresample=RATE. */
+const shift = (offset) => (!offset ? ""
+  : offset > 0 ? `,adelay=${Math.round(offset * RATE)}S:all=1`
+    : `,atrim=start_sample=${Math.round(-offset * RATE)},asetpts=N/SR/TB`);
+
+// ---------- AAC на всех ядрах ----------
+// Кодировщик AAC в ffmpeg работает на одном ядре: 2 ч звука 256 кбит/с — ~2,5 мин, и ускорить его самого
+// нечем (ffmpeg 8 вместо 6.1 — на 5–10 %). Поэтому звук режется на куски, куски кодируются одновременно
+// отдельными ffmpeg и склеиваются по пакетам. Проверено на 21-мин дорожке (8 кусков): 26 → 8 с, длина и
+// положение до сэмпла как у обычного кодирования, средний SNR тот же (38,1 дБ).
+// - Каждый кусок считает граф фильтров с самого начала и вырезает свой отрезок (atrim по сэмплам): перемотка
+//   входа (-ss) точна лишь до миллисекунды — куски разъезжались бы на несколько сэмплов. Начало графа
+//   считается быстро (декодирование и фильтры — ~3 с на 20 мин), дольше всего — само кодирование.
+// - Отрезок кодируется с запасом CHUNK_PAD кадров с обеих сторон: кодировщику нужно «разогнаться» —
+//   с запасом 16 кадров кадры у стыков выходили заметно хуже обычных, с 64 (~1,4 с) — не отличить.
+// - Из каждого куска берутся только пакеты своего отрезка. Пакет j куска, начатого с сэмпла a, декодируется
+//   в сэмплы [a + (j−1)·1024, a + j·1024): первый пакет — «разгон» кодировщика (1024 сэмпла задержки).
+//   Склейка начинается с «разгона» первого куска, как у обычного кодирования, — в m4a он помечается задержкой.
+const FRAME = 1024;
+const CHUNK_PAD = 64;
+const PARALLEL_MIN_SEC = 180; // короче — одним процессом: выигрыш меньше, чем запуск десятка ffmpeg
+const CORES = Math.max(1, os.availableParallelism?.() ?? os.cpus().length);
+
+/**
+ * Отрезки по кадрам: [from, to) — свои, последний открыт до конца. Последующие куски сначала проходят граф
+ * до своего начала, поэтому они короче: время каждого ≈ r·начало + длина (r — сколько стоит проход графа
+ * против кодирования, ~0,1: подобрано на 2-ч дорожке — 16 кусков кончают за 28–34 с, всё — 36 с вместо 167) —
+ * подбираем общую длительность T так, чтобы хватило n кусков. Больше 16 кусков не быстрее (22 — 40 с).
+ */
+function chunkPlan(totalFrames, n, r = 0.1) {
+  const fits = (T) => {
+    const chunks = [];
+    let from = 0;
+    while (from < totalFrames) {
+      const len = Math.floor(T - r * from);
+      if (len < CHUNK_PAD * 4 || chunks.length === n) return null;
+      chunks.push([from, Math.min(totalFrames, from + len)]);
+      from += len;
+    }
+    return chunks;
+  };
+  let lo = 1, hi = totalFrames;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (fits(mid)) hi = mid; else lo = mid + 1;
+  }
+  const chunks = fits(lo) ?? [[0, totalFrames]];
+  chunks.at(-1)[1] = Infinity;
+  return chunks;
+}
+
+/** Пакеты ADTS из файла (у каждого заголовок со своей длиной). */
+function adtsPackets(buf) {
+  const packets = [];
+  for (let o = 0; o + 7 <= buf.length;) {
+    if (buf[o] !== 0xff || (buf[o + 1] & 0xf0) !== 0xf0) throw new Error("ffmpeg: повреждён кусок звука (ADTS)");
+    const len = ((buf[o + 3] & 3) << 11) | (buf[o + 4] << 3) | (buf[o + 5] >> 5);
+    packets.push(buf.subarray(o, o + len));
+    o += len;
+  }
+  return packets;
+}
+
+/**
+ * Звук из графа фильтров (выход [mix], RATE Гц) → AAC в m4a, на всех ядрах. inputs — аргументы входов ffmpeg;
+ * after — аргументы вывода (метаданные). Короткий звук или мало ядер — одним процессом, как обычно.
+ */
+async function encodeAac(inputs, graph, out, { kbps, fast = false, duration, onProgress, signal, after = [] }) {
+  const codec = ["-c:a", "aac", "-b:a", `${kbps}k`, ...(fast ? ["-aac_coder", "fast"] : [])];
+  if (!graph.endsWith("[mix]")) throw new Error("encodeAac: граф должен кончаться выходом [mix]");
+  const n = Math.min(16, CORES - 1);
+  if (!(duration >= PARALLEL_MIN_SEC) || n < 2) {
+    await withFilterScript(graph, (script) => ffmpeg(["-v", "error", "-stats", ...inputs, FILTER_SCRIPT_FLAG, script,
+      "-map", "[mix]", ...codec, "-movflags", "+faststart", ...after, out], { duration, onProgress, signal }));
+    return;
+  }
+  const chunks = chunkPlan(Math.ceil((duration * RATE) / FRAME), n);
+  // один кусок не вышел — остальные останавливаем
+  const stop = new AbortController();
+  const onAbort = () => stop.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const tag = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const files = chunks.map((_, i) => tempFile(`aac-${tag}-${i}.aac`));
+  const joined = tempFile(`aac-${tag}.aac`);
+  const done = chunks.map(() => 0);
+  let shown = 0; // ход — не назад: ffmpeg кусков отчитываются вразнобой
+  const report = () => {
+    shown = Math.max(shown, done.reduce((a, b) => a + b, 0) / chunks.length);
+    onProgress?.(shown);
+  };
+  try {
+    await Promise.all(chunks.map(async ([from, to], i) => {
+      const a = Math.max(0, from - CHUNK_PAD); // с какого кадра кусок кодирует (с запасом)
+      const b = to === Infinity ? null : to + CHUNK_PAD;
+      const trim = `atrim=start_sample=${a * FRAME}${b === null ? "" : `:end_sample=${b * FRAME}`},asetpts=N/SR/TB`;
+      const len = ((b ?? Math.ceil((duration * RATE) / FRAME)) - a) * FRAME / RATE;
+      try {
+        await withFilterScript(`${graph.slice(0, -"[mix]".length)},${trim}[mix]`, (script) => ffmpeg([
+          "-v", "error", "-stats", ...inputs, FILTER_SCRIPT_FLAG, script, "-map", "[mix]", ...codec, "-f", "adts", files[i],
+        ], { duration: len, onProgress: (p) => { done[i] = p; report(); }, signal: stop.signal }));
+      } catch (e) {
+        stop.abort();
+        throw e;
+      }
+    }));
+    const parts = chunks.map(([from, to], i) => {
+      const a = Math.max(0, from - CHUNK_PAD);
+      const packets = adtsPackets(readFileSync(files[i]));
+      // пакет j — сэмплы [a + (j−1)·1024, …): свои — с кадра from; у первого куска — и «разгон» (j = 0)
+      return packets.slice(i === 0 ? 0 : from - a + 1, to === Infinity ? packets.length : to - a + 1);
+    });
+    writeFileSync(joined, Buffer.concat(parts.flat()));
+    // «разгон» в начале склейки — задержка кодировщика: сдвигаем на него, и m4a помечает его, как при обычном
+    // кодировании (проверено: число сэмплов и положение совпадают)
+    await ffmpeg(["-v", "error", "-itsoffset", (-FRAME / RATE).toFixed(6), "-i", joined, "-map", "0:a", "-c", "copy",
+      "-movflags", "+faststart", ...after, out], { signal });
+  } catch (e) {
+    throw signal?.aborted ? new Error("Отменено") : e;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    for (const f of [...files, joined]) dropTemp(f);
+  }
 }
 
 /**
@@ -409,8 +576,11 @@ function origReference(opts, analysis) {
  * offset — с какой секунды вырезан кусок (для предпрослушивания): фразы сдвигаются к началу куска;
  * громкость для подстройки при этом считается по всему видео — кусок звучит так же, как в файле.
  * duration — длина итога, с (длина видео); null — по длине входов.
+ * origDelay — на сколько звук оригинала начинается позже начала видео (копия звука эту задержку теряет).
+ * Метки времени входов сбрасываются (asetpts): amix всё равно складывает звуки сэмпл к сэмплу, не глядя на них, —
+ * задержка ставится явно, до сэмпла, а итог начинается с нуля (это нужно и кускам encodeAac).
  */
-function mixFilter(opts, analysis, offset = 0, duration = null) {
+function mixFilter(opts, analysis, offset = 0, duration = null, origDelay = 0) {
   const { voiceGain = 1, originalVolume = 30, mixMode = "duck", autoLevel = true } = opts;
   const level = Math.min(100, Math.max(0, Number(originalVolume) || 0)) / 100;
 
@@ -423,7 +593,7 @@ function mixFilter(opts, analysis, offset = 0, duration = null) {
 
   // оба звука — в стерео до смешивания: перевод Яндекса моно, и без этого amix сводит к моно
   // всю итоговую дорожку, теряя стерео оригинала
-  const orig = "[0:a:0]aresample=48000,aformat=channel_layouts=stereo";
+  const orig = `[0:a:0]asetpts=N/SR/TB,aresample=${RATE},aformat=channel_layouts=stereo${shift(origDelay)}`;
   let origChain;
   if (level >= 1) {
     origChain = `${orig}[duck]`;
@@ -437,7 +607,7 @@ function mixFilter(opts, analysis, offset = 0, duration = null) {
   }
 
   const filter = [
-    `[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=${voiceVolume.toFixed(4)}[voice]`,
+    `[1:a]asetpts=N/SR/TB,aresample=${RATE},aformat=channel_layouts=stereo,volume=${voiceVolume.toFixed(4)}[voice]`,
     origChain,
     // длина — по видео: amix с duration=first у некоторых звуков (FLAC — частый в MKV) обрывает конец
     // на ~1,5 с, поэтому сводим по самому длинному входу и обрезаем точно по длине видео.
@@ -469,7 +639,7 @@ async function withFilterScript(filter, run) {
  */
 export async function mux(video, voice, subs, out, opts = {}, duration, onProgress, signal, plan = mkvPlan("")) {
   const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
-  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration);
+  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration, opts.origOffset ?? 0);
   const withSubs = Boolean(subs && plan.subs);
   // opts.origInfo — сведения о звуке оригинала (probe().audio): перевод кодируем не хуже него
   const src = opts.origInfo ?? {};
@@ -504,15 +674,12 @@ export async function mux(video, voice, subs, out, opts = {}, duration, onProgre
  */
 export async function mixAudio(orig, voice, out, opts = {}, duration, onProgress, signal) {
   const analysis = opts.voiceAnalysis ?? await analyzeVoice(voice, signal);
-  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration);
-  await withFilterScript(filter, (script) => ffmpeg([
-    "-v", "error", "-stats",
-    ...origInput(orig), "-i", voice,
-    FILTER_SCRIPT_FLAG, script,
-    "-map", "[mix]", "-vn", ...audioArgs(":a", "aac", opts.origInfo ?? {}, { fast: opts.fastAudio }), "-movflags", "+faststart",
-    "-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Перевод",
-    out,
-  ], { duration, onProgress, signal }));
+  const src = typeof orig === "string" ? { path: orig, offset: 0 } : orig;
+  const { filter, autoGainDb } = mixFilter(opts, analysis, 0, duration, src.offset);
+  await encodeAac(["-i", src.path, "-i", voice], filter, out, {
+    kbps: audioKbps("aac", opts.origInfo ?? {}), fast: opts.fastAudio, duration, onProgress, signal,
+    after: ["-metadata:s:a:0", "language=rus", "-metadata:s:a:0", "title=Перевод"],
+  });
   return { autoGainDb };
 }
 
