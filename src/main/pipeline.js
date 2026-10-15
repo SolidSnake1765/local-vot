@@ -76,6 +76,7 @@ function freePath(p) {
 }
 
 const fmtSec = (s) => (s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${String(s % 60).padStart(2, "0")} с`);
+const MAX_DURATION_SEC = 4 * 3600; // предел переводчика Яндекса
 const DISK_BYTES_PER_SEC = 130_000; // если сработает ограничение Диска: ~127 КБ/с (замерено)
 
 /**
@@ -378,6 +379,13 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   step("light", { state: "active", detail: "Проверяем видео" });
   const { duration, audioCopyable, start, audio } = await probe(job.file);
   job.duration = duration;
+  // переводчик Яндекса берёт видео не длиннее 4 часов (выяснил пользователь, 15.10) — не тратим чтение
+  // исходника и месячный лимит загрузки Диска на то, что всё равно не переведётся
+  if (duration > MAX_DURATION_SEC) {
+    const len = `${Math.floor(duration / 3600)} ч ${Math.round((duration % 3600) / 60)} мин`;
+    throw new Error(`Видео длиннее 4 часов (${len}) — переводчик Яндекса такие не берёт. `
+      + "Можно разрезать его на части и перевести каждую.");
+  }
   log.info(`видео #${job.no}`, `исходник: ${Math.round(duration)} с, ${size((await stat(job.file)).size)}, `
     + `звук ${audio.codec} ${audio.kbps ?? "?"} кбит/с ${audio.channels} кан.`);
   // облегчённая копия ≈ звук + чёрный кадр: ~20–40 КБ на секунду видео; копия звука оригинала — столько же
@@ -481,7 +489,7 @@ async function translateOnce(job, work, token, step, emit, signal) {
   const base = path.join(work, "yandex");
   let lively = Boolean(job.lively);
   // живые голоса — только с английского (и не с автоопределением), интерфейс держит это же правило
-  const lang = lively ? LIVELY_LANG : (job.lang || "auto");
+  let lang = lively ? LIVELY_LANG : (job.lang || "auto");
   let result;
   try {
     step("translate", { state: "active", detail: "Открываем доступ к файлу" });
@@ -496,17 +504,44 @@ async function translateOnce(job, work, token, step, emit, signal) {
       }
       throw e;
     }
+    // Яндекс назвал другой язык речи ещё до конца перевода (LANG_MISMATCH из vot.js) — дальше как с готовым
+    // переводом на этом языке, только без ожидания: ниже либо переключение на автоопределение, либо ошибка
+    const attempt = (opts) => translate(url, job.duration, base, onStatus, signal, opts).catch((e) => {
+      if (e.code !== "LANG_MISMATCH") throw e;
+      log.info(`видео #${job.no}`, `Яндекс назвал язык речи до конца перевода: ${e.detectedLang}`);
+      return { early: true, detectedLang: e.detectedLang };
+    });
     try {
-      result = await translate(url, job.duration, base, onStatus, signal, { lively, token, lang });
+      result = await attempt({ lively, token, lang });
     } catch (e) {
-      if (!lively || signal.aborted) throw e;
+      // «нет речи» обычными голосами не исправить: в журналах пользователя после такого отказа живых голосов
+      // обычные не получились ни разу из 117 (116 — тоже «нет речи»), а второй запрос — ещё ~40 с ожидания
+      if (!lively || signal.aborted || /нет речи/i.test(e.message)) throw e;
       log.warn(`видео #${job.no}`, "живые голоса не получились — обычными", e);
       // живые голоса доступны не всегда — не теряем перевод, пробуем обычными
       onStatus("Живые голоса не получились, переводим обычными");
-      result = await translate(url, job.duration, base, onStatus, signal, { lang });
+      result = await attempt({ lang });
     }
-    log.info(`видео #${job.no}`, `перевод получен: живые голоса ${result.lively ? "да" : "нет"}, `
-      + `найденный язык ${result.detectedLang || "совпал с указанным"}, субтитров ${result.subsCount ?? 0}`);
+    if (!result.early) {
+      log.info(`видео #${job.no}`, `перевод получен: живые голоса ${result.lively ? "да" : "нет"}, `
+        + `найденный язык ${result.detectedLang || "совпал с указанным"}, субтитров ${result.subsCount ?? 0}`);
+    }
+    // Живые голоса просили (значит, с английского), а Яндекс нашёл в видео другой язык — по журналам пользователя
+    // так было 48 раз (японский 41, немецкий, французский, корейский), и Яндекс определял язык верно. Вместо
+    // ошибки «английская речь не найдена» — сразу перевод обычными голосами с автоопределением; у видео голос
+    // и язык меняются на эти (main передаёт их в карточку), чтобы «Перевести заново» не повторяло неудачное
+    if (job.lively && result.detectedLang === "ru") throw new Error("В видео русская речь — переводить на русский нечего.");
+    if (job.lively && result.detectedLang && result.detectedLang !== LIVELY_LANG) {
+      log.info(`видео #${job.no}`, `речь не английская (${result.detectedLang}) — переводим обычными голосами с автоопределением`);
+      onStatus(`В видео не английская речь (${detectedName(result.detectedLang).toLowerCase()}) — переводим обычными голосами`);
+      lively = false;
+      lang = "auto";
+      job.lively = false;
+      job.lang = "auto";
+      emit({ step: "translate", lively: false, lang: "auto" }); // карточка переключается сразу, а не после сборки
+      result = await translate(url, job.duration, base, onStatus, signal, { lang });
+      log.info(`видео #${job.no}`, `перевод получен: автоопределение — ${result.detectedLang || "?"}, субтитров ${result.subsCount ?? 0}`);
+    }
     checkLanguage(lang, lively, result.detectedLang);
     lively = result.lively;
     const langText = lang === "auto"

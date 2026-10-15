@@ -92,7 +92,27 @@ $("copyCode").onclick = () => navigator.clipboard.writeText($("codeText").textCo
 $("loginCancel").onclick = () => { api.cancelLogin(); $("loginModal").hidden = true; };
 $("accountBtn").onclick = async () => {
   if (loggedIn) {
-    await api.logout();
+    // выход прерывает переводы этого аккаунта — спросить, если они идут
+    const list = [...cards.values()];
+    const busy = list.filter((c) => c.state === "running" || c.state === "queued").length;
+    if (busy) {
+      const ok = await askUser({
+        title: "Выйти из Яндекса?",
+        text: `Переводятся или ждут очереди: ${busy}. Они будут отменены — потом их можно запустить снова `
+          + "уже с другим входом. Копии видео на Диске этого аккаунта уберутся.",
+        buttons: [{ label: "Выйти", value: true, kind: "danger" }, { label: "Не выходить", value: null, kind: "ghost" }],
+      });
+      if (!ok) return;
+      await api.cancelAll();
+    }
+    const btn = $("accountBtn");
+    btn.disabled = true;
+    btn.textContent = "Выходим…";
+    try {
+      await api.logout();
+    } finally {
+      btn.disabled = false;
+    }
     await refreshAccount();
   } else {
     startLogin();
@@ -481,7 +501,16 @@ function showOutputs(card, outputs) {
   }
 }
 
+// место на Диске в шапке: копии загружаются по ходу очереди — обновляем, когда видео закончило
+// (не чаще раза в несколько секунд: в длинной очереди видео заканчивают пачками)
+let accountTimer = null;
+const refreshAccountSoon = () => {
+  clearTimeout(accountTimer);
+  accountTimer = setTimeout(() => refreshAccount().catch(() => {}), 3000);
+};
+
 api.on("job:update", (u) => {
+  if (loggedIn && ["done", "error"].includes(u.state) && !u.step) refreshAccountSoon();
   const card = cards.get(u.id);
   if (!card) {
     early.set(u.id, [...(early.get(u.id) ?? []), u]);
@@ -505,6 +534,16 @@ function applyUpdate(card, u) {
   if (u.reset) resetSteps(card);
   if (u.voiceUsed !== undefined) card.voiceUsed = u.voiceUsed;
   if (u.langUsed !== undefined) card.langUsed = u.langUsed;
+  // голос и язык видео могла поменять сама программа (живые голоса, а речь не английская → обычные,
+  // автоопределение) — показываем, что теперь стоит у видео
+  if (u.lively !== undefined && u.lively !== card.lively) {
+    card.lively = u.lively;
+    card.node.querySelector(".job-lively").checked = u.lively;
+  }
+  if (u.lang !== undefined && u.lang !== card.lang) {
+    card.lang = u.lang;
+    card.node.querySelector(".job-lang").value = u.lang;
+  }
   if (u.hasTranslation !== undefined) card.hasTranslation = u.hasTranslation;
   if (u.preview !== undefined && !["queued", "running"].includes(u.state)) setupPreview(card, u.preview);
   if (u.state && !u.step) setState(card, u.state);

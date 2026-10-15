@@ -7,7 +7,11 @@ import { log } from "./log.js";
 
 const API = "https://cloud-api.yandex.net/v1/disk";
 const RETRY_DELAYS = [2_000, 5_000, 10_000];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) return reject(new Error("Отменено"));
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Отменено")); }, { once: true });
+});
 
 // Диск режет загрузку через API до ~128 КиБ/с для видео, архивов и т.п. — скорость назначается
 // при выдаче ссылки на загрузку. Если запросить ссылку от имени официальной программы Диска,
@@ -25,22 +29,27 @@ async function api(token, method, endpoint, params = {}, signal, extraHeaders = 
     } catch (e) {
       if (signal?.aborted || attempt >= RETRY_DELAYS.length) throw e;
       log.warn("Диск", `${method} ${endpoint}: сбой сети, повтор ${attempt + 1}`, e);
-      await sleep(RETRY_DELAYS[attempt]);
+      await sleep(RETRY_DELAYS[attempt], signal);
       continue;
     }
     const text = await res.text();
-    const data = text ? JSON.parse(text) : {};
+    // при сбое Диск отвечает и HTML-страницей (502/504) — разбор не должен ронять повтор
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { /* не JSON */ }
     if (res.ok) return data;
-    if (res.status >= 500 && attempt < RETRY_DELAYS.length) {
+    // 423 у загрузки — лимит загрузки (ниже); у остальных — «над ресурсом выполняется другая операция»
+    // (было у публикации сразу после загрузки): это временно — повторяем, как 500/503
+    const busy = res.status === 423 && endpoint !== "/resources/upload";
+    if ((res.status >= 500 || busy) && attempt < RETRY_DELAYS.length) {
       log.warn("Диск", `${method} ${endpoint}: ответ ${res.status}, повтор ${attempt + 1}`);
-      await sleep(RETRY_DELAYS[attempt]);
+      await sleep(RETRY_DELAYS[attempt], signal);
       continue;
     }
     log.warn("Диск", `${method} ${endpoint}: ответ ${res.status}`, data.message ?? data.error ?? text.slice(0, 300));
     if (res.status === 401) throw new Error("Вход в Яндекс устарел — войдите заново");
     if (res.status === 507) throw new Error("На Яндекс Диске не хватает места");
-    if (res.status === 423) throw uploadLimitError();
-    throw new Error(`Диск: ${data.message ?? data.error ?? text} (${res.status})`);
+    if (res.status === 423 && !busy) throw uploadLimitError();
+    throw new Error(`Диск: ${data.message ?? data.error ?? text.slice(0, 200)} (${res.status})`);
   }
 }
 
@@ -72,10 +81,11 @@ function putFile(href, file, onProgress, signal) {
             + "одним файлом (на бесплатном — 1 ГБ). Такое бывает у очень длинных видео."));
         }
         if (res.statusCode === 507) return reject(new Error("На Яндекс Диске не хватает места"));
-        reject(new Error(`Диск: загрузка не удалась (${res.statusCode}) ${body}`));
+        // 5xx (было: 504 с HTML-страницей) — временно, upload повторит; текст страницы в сообщение не тащим
+        reject(Object.assign(new Error(`Диск: загрузка не удалась (${res.statusCode})`), { retry: res.statusCode >= 500 }));
       });
     });
-    req.on("error", (e) => reject(signal?.aborted ? new Error("Отменено") : e));
+    req.on("error", (e) => reject(signal?.aborted ? new Error("Отменено") : Object.assign(e, { retry: true })));
     let sent = 0;
     const stream = createReadStream(file, { highWaterMark: 64 * 1024 });
     stream.on("data", (chunk) => {
@@ -93,18 +103,33 @@ function putFile(href, file, onProgress, signal) {
 /** Загружает файл в папку приложения, возвращает путь на Диске (app:/...). */
 export async function upload(token, file, onProgress, signal) {
   const diskPath = `app:/${Date.now()}-${path.basename(file).replace(/[^\w.-]+/g, "_")}`;
-  const { href } = await api(token, "GET", "/resources/upload", { path: diskPath, overwrite: "true" }, signal,
-    UPLOAD_LINK_HEADERS);
-  await putFile(href, file, onProgress, signal);
-  return diskPath;
+  // обрыв связи или 5xx посреди загрузки (было: 504) — заново, с новой ссылкой; отказы по сути (лимит, место,
+  // размер) — сразу
+  for (let attempt = 0; ; attempt++) {
+    const { href } = await api(token, "GET", "/resources/upload", { path: diskPath, overwrite: "true" }, signal,
+      UPLOAD_LINK_HEADERS);
+    try {
+      await putFile(href, file, onProgress, signal);
+      return diskPath;
+    } catch (e) {
+      if (signal?.aborted || !e.retry || attempt >= RETRY_DELAYS.length) throw e;
+      log.warn("Диск", `загрузка: ${e.message}, повтор ${attempt + 1}`);
+      await sleep(RETRY_DELAYS[attempt], signal);
+    }
+  }
 }
 
 /** Публикует файл и возвращает публичную ссылку (https://disk.yandex.ru/i/...). */
 export async function publish(token, diskPath, signal) {
   await api(token, "PUT", "/resources/publish", { path: diskPath }, signal);
-  const meta = await api(token, "GET", "/resources", { path: diskPath, fields: "public_url" }, signal);
-  if (!meta.public_url) throw new Error("Диск не выдал публичную ссылку");
-  return meta.public_url;
+  // ссылка появляется не всегда сразу после публикации (было: «Диск не выдал публичную ссылку») — подождём
+  for (let attempt = 0; ; attempt++) {
+    const meta = await api(token, "GET", "/resources", { path: diskPath, fields: "public_url" }, signal);
+    if (meta.public_url) return meta.public_url;
+    if (attempt >= RETRY_DELAYS.length) throw new Error("Диск не выдал публичную ссылку");
+    log.warn("Диск", `публичной ссылки ещё нет, повтор ${attempt + 1}`);
+    await sleep(RETRY_DELAYS[attempt], signal);
+  }
 }
 
 export async function unpublish(token, diskPath) {

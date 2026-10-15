@@ -21,6 +21,11 @@ import { promisify } from "node:util";
 
 // портативная версия — все данные в папке data рядом с программой (до готовности приложения)
 setupDataPaths();
+// Одна копия программы: вторая при запуске чистит временную папку и копии на Диске — у первой пропали бы
+// идущие переводы (двойной щелчок по ярлыку — частое дело). Вторая просто показывает окно первой.
+// Замок — по папке данных: установленная, портативная и разработка друг другу не мешают.
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.exit(0);
 setTempDir(workRoot());
 initLog(path.join(app.getPath("userData"), "logs"));
 // ключ приложения и папка сохранения — личное, в журнале их не будет
@@ -164,7 +169,7 @@ async function runOne(job) {
       + (stuck ? `; прежнюю версию убрать не удалось (файлов: ${stuck})` : ""), soundUsed);
     batch.done++;
     notify(`Готово: ${job.name}`, `Сохранено: ${files.map((p) => path.extname(p).slice(1).toUpperCase()).join(", ")}`);
-    send("job:update", { id: job.id, state: "done", outputs: job.outputs, voiceUsed: lively, langUsed: lang,
+    send("job:update", { id: job.id, state: "done", outputs: job.outputs, voiceUsed: lively, langUsed: lang, lively: job.lively, lang: job.lang,
       hasTranslation: true, preview: previewInfo(job),
       note: stuck ? `Прежнюю версию убрать не удалось (файлов: ${stuck}) — возможно, она открыта в плеере. Новая сохранена рядом.` : "" });
   } catch (e) {
@@ -178,7 +183,7 @@ async function runOne(job) {
     }
     // перевод получен, а сохранить не вышло — звук для карточки всё равно закрепляем (от настроек по умолчанию)
     if (job.translation && !job.sound) job.sound = pickSound(loadSettings());
-    send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "",
+    send("job:update", { id: job.id, state: job.state, error: job.state === "error" ? e.message : "", lively: job.lively, lang: job.lang,
       hasTranslation: Boolean(job.translation), preview: previewInfo(job) });
   } finally {
     lightTurn?.then((release) => release(), () => {}); // не дошли до копии (ошибка, отмена) — место отдаём
@@ -582,7 +587,16 @@ ipcMain.handle("auth:login", async () => {
   }
 });
 ipcMain.handle("auth:cancel", () => loginController?.abort());
-ipcMain.handle("auth:logout", () => { log.info("вход", "выход из Яндекса"); return auth.logout(); });
+ipcMain.handle("auth:logout", async () => {
+  log.info("вход", "выход из Яндекса");
+  // Копии видео лежат на Диске этого аккаунта: после выхода их уже не убрать, а «Перевести заново» искало бы
+  // их на Диске нового аккаунта (и падало с «копия пропала»). Убираем сейчас, пока вход действует; идущие
+  // переводы окно перед этим отменило — дожидаемся, пока они закроют ссылки
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  if (running.size) await Promise.race([Promise.all(running.values()), wait(20_000)]);
+  await Promise.race([Promise.all([...jobs.values()].map((j) => removeDiskCopy(j))), wait(20_000)]);
+  auth.logout();
+});
 ipcMain.handle("auth:openPage", (_e, url) => {
   // открываем только страницы Яндекса — адрес приходит из интерфейса
   if (/^https:\/\/([a-z0-9-]+\.)*(ya\.ru|yandex\.ru)\//.test(url)) shell.openExternal(url);
@@ -849,7 +863,13 @@ function createWindow() {
 }
 
 if (process.platform === "win32") app.setAppUserModelId(AUMID);
-app.whenReady().then(() => {
+app.on("second-instance", () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
+if (primary) app.whenReady().then(() => {
   log.info("запуск", `Local VOT ${app.getVersion()} (${isPortable() ? "портативная" : app.isPackaged ? "установленная" : "разработка"}), `
     + `Windows ${os.release()} ${process.arch}, Electron ${process.versions.electron}, ffmpeg встроенный`);
   // временные файлы и сохранённые переводы прошлого запуска (если он завершился аварийно)

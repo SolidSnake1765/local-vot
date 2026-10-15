@@ -25,13 +25,33 @@ YandexVOTProtobuf.decodeTranslationResponse = (buf) => {
 // status: 1 — готово, 2/3 — ждём, 5 — готова только часть (~10 мин), ждём полный перевод, 0 — отказ
 const FINISHED = 1;
 const PART_CONTENT = 5;
-const TIMEOUT = 30 * 60_000;
+const TIMEOUT = 60 * 60_000; // самое долгое ожидание в журналах пользователя — 21 мин (27-мин видео)
 const POLL = 30_000; // как в vot-cli; remainingTime у Яндекса приблизительный
 
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
   const t = setTimeout(resolve, ms);
   signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Отменено")); }, { once: true });
 });
+
+/**
+ * Скачать готовую дорожку: перевод уже сделан, и сбой связи на скачивании не должен его терять — повторяем.
+ * Ответ проверяем: страница ошибки вместо MP3 дальше дала бы непонятный сбой разбора звука.
+ */
+async function download(url, signal) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`ответ ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 1024) throw new Error(`слишком маленький файл (${buf.length} байт)`);
+      return buf;
+    } catch (e) {
+      if (signal?.aborted) throw new Error("Отменено");
+      if (attempt >= 4) throw new Error(`Не удалось скачать готовый перевод: ${e.message}`);
+      await sleep(5_000 * attempt, signal);
+    }
+  }
+}
 
 /**
  * @param duration длительность, с — обязательна: для ссылок Диска вида /i/... vot.js её не знает,
@@ -72,9 +92,17 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
       continue;
     }
     if (res.translated && res.status === FINISHED) break;
+    // Яндекс может назвать язык речи ещё до конца перевода (промежуточные ответы тоже проходят через
+    // decodeTranslationResponse). Язык указан явно, а речь другая — дальше ждать незачем: перевод выйдет
+    // бессмыслицей, а pipeline либо переключится на автоопределение (живые голоса), либо скажет об ошибке
+    const early = responses.get(res.translationId)?.language;
+    if (lang !== "auto" && early && early !== lang) {
+      responses.delete(res.translationId);
+      throw Object.assign(new Error(`Яндекс нашёл в видео другой язык: ${early}`), { code: "LANG_MISMATCH", detectedLang: early });
+    }
     const left = res.remainingTime > 0 ? `, осталось ~${Math.ceil(res.remainingTime / 60)} мин` : "";
     onStatus(res.status === PART_CONTENT ? `Готова часть перевода, ждём остальное${left}` : `Яндекс переводит${left}`);
-    if (Date.now() - started > TIMEOUT) throw new Error("Перевод не готов за 30 минут — попробуйте позже");
+    if (Date.now() - started > TIMEOUT) throw new Error("Перевод не готов за час — попробуйте позже");
     await sleep(POLL, signal);
   }
 
@@ -87,15 +115,16 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
   };
 
   onStatus("Скачиваем перевод");
-  const audio = Buffer.from(await (await fetch(res.url, { signal })).arrayBuffer());
-  writeFileSync(result.audio, audio);
+  writeFileSync(result.audio, await download(res.url, signal));
 
-  // Субтитры: Яндекс отдаёт оригинальные и переведённые (json, таймкоды в мс)
+  // Субтитры: Яндекс отдаёт оригинальные и переведённые (json, таймкоды в мс). Берём только русские:
+  // раньше без русских брались первые попавшиеся — в видео ложились английские с подписью «Русские»
   try {
     const subs = await client.getSubtitles({ videoData, requestLang: lang === "auto" ? (detectedLang ?? "en") : lang });
-    const ru = subs.subtitles.find((s) => s.translatedLanguage === "ru") ?? subs.subtitles[0];
-    if (ru) {
-      const raw = await (await fetch(ru.translatedUrl ?? ru.url, { signal })).json();
+    const pick = subs.subtitles.find((s) => s.translatedLanguage === "ru" && s.translatedUrl);
+    const url = pick?.translatedUrl ?? subs.subtitles.find((s) => s.language === "ru")?.url;
+    if (url) {
+      const raw = await (await fetch(url, { signal })).json();
       const lines = raw.subtitles ?? [];
       const ts = (ms) => new Date(ms).toISOString().slice(11, 23).replace(".", ",");
       writeFileSync(`${base}.ru.srt`, lines.map((s, i) =>
