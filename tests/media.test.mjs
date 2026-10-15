@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -75,6 +76,28 @@ test("ffmpeg — с приоритетом ниже обычного: окно �
     assert.equal(os.getPriority(p.pid), os.constants.priority.PRIORITY_BELOW_NORMAL);
   } finally {
     p.kill();
+  }
+});
+
+// «Проверяем видео» на недокачанном торренте висело, и «Отменить» не помогала (пользователь, 16.10). Канал, в который
+// никто не пишет, — то же самое для ffmpeg: открыл и ждёт данных бесконечно
+test("файл, который не читается: проверка видео останавливается по отмене и по времени", { skip }, async () => {
+  const pipe = `\\\\.\\pipe\\local-vot-test-${process.pid}`;
+  const server = net.createServer(() => {}); // соединение принимаем и молчим
+  await new Promise((r) => server.listen(pipe, r));
+  try {
+    for (const [what, run] of [["сведения", (s, t) => media.probe(pipe, s, t)], ["задержка звука", (s, t) => media.audioOffset(pipe, 0, s, t)]]) {
+      const stop = new AbortController();
+      setTimeout(() => stop.abort(), 300);
+      let t = Date.now();
+      await assert.rejects(run(stop.signal), /Отменено/, `${what}: отмена`);
+      assert.ok(Date.now() - t < 3000, `${what}: отмена сразу, а не через ${Date.now() - t} мс`);
+      t = Date.now();
+      await assert.rejects(run(undefined, 1000), /не читается.*не докачано/, `${what}: по времени`);
+      assert.ok(Date.now() - t < 4000, `${what}: по времени — ${Date.now() - t} мс`);
+    }
+  } finally {
+    server.close();
   }
 });
 

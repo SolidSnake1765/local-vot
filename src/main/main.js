@@ -929,7 +929,7 @@ async function makeThumb(job) {
     const file = path.normalize(job.file); // Windows нужен путь с обратными слэшами
     const url = await windowsThumb(file);
     if (url) return url;
-    const { duration } = await probe(file).catch(() => ({ duration: 0 }));
+    const { duration } = await probe(file, undefined, 20_000).catch(() => ({ duration: 0 }));
     const jpeg = await grabFrame(file, duration);
     return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
   } catch (e) {

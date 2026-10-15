@@ -71,38 +71,53 @@ function ffmpeg(args, { duration, onProgress, signal } = {}) {
 }
 
 /**
+ * Короткий запуск ffmpeg «посмотреть на файл» (сведения, задержка звука, кадр): обычно доли секунды, но
+ * недокачанный или занятый файл (торрент, сетевой диск) может держать его сколько угодно — поэтому
+ * останавливается и по отмене, и по времени. Возвращает { out: Buffer (stdout), err: string (stderr), timedOut }.
+ */
+function briefRun(args, { signal, timeout }) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("Отменено"));
+    const p = spawn(FFMPEG, ["-hide_banner", "-nostdin", ...args], { windowsHide: true });
+    const out = [];
+    let err = "";
+    let timedOut = false;
+    const kill = () => p.kill();
+    const timer = setTimeout(() => { timedOut = true; kill(); }, timeout);
+    signal?.addEventListener("abort", kill, { once: true });
+    p.stdout.on("data", (d) => out.push(d));
+    p.stderr.on("data", (d) => { err += d; });
+    const finish = (code) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", kill);
+      if (signal?.aborted) reject(new Error("Отменено"));
+      else resolve({ out: Buffer.concat(out), err, code, timedOut });
+    };
+    p.on("error", () => { err = ""; finish(-1); });
+    p.on("close", finish);
+  });
+}
+const NOT_READABLE = "Файл не читается: ffmpeg не смог его открыть за минуту. Возможно, видео ещё не докачано "
+  + "или файл занят другой программой";
+
+/**
  * Кадр для миниатюры (JPEG, ширина 320) — когда Windows не умеет сделать миниатюру сама (нет кодека).
  * Берём кадр с 10 % длительности (не дальше 60 с): в самом начале часто чёрная заставка.
  * -ss перед -i — прыжок, а не чтение с начала: быстро даже на десятках гигабайт.
  */
 export async function grabFrame(file, duration = 0) {
   const at = Math.min(60, Math.max(0, duration * 0.1));
-  return new Promise((resolve, reject) => {
-    const p = spawn(FFMPEG, ["-hide_banner", "-v", "error", "-ss", at.toFixed(2), "-i", file, "-frames:v", "1",
-      "-vf", "scale=320:-2", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"], { windowsHide: true });
-    const chunks = [];
-    let err = "";
-    p.stdout.on("data", (d) => chunks.push(d));
-    p.stderr.on("data", (d) => { err = (err + d).slice(-500); });
-    p.on("error", reject);
-    p.on("close", (code) => {
-      const buf = Buffer.concat(chunks);
-      if (code === 0 && buf.length) resolve(buf);
-      else reject(new Error(`ffmpeg: кадр не получен ${err.trim()}`));
-    });
-  });
+  const { out, err, code, timedOut } = await briefRun(["-v", "error", "-ss", at.toFixed(2), "-i", file, "-frames:v", "1",
+    "-vf", "scale=320:-2", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"], { timeout: 30_000 });
+  if (code !== 0 || !out.length) throw new Error(`ffmpeg: кадр не получен ${timedOut ? "(за 30 с)" : err.slice(-500).trim()}`);
+  return out;
 }
 
 /** Длительность видео в секундах; заодно проверяет, что в файле есть звук. */
-export async function probe(file) {
+export async function probe(file, signal, timeout = 60_000) {
   // ffmpeg без выходного файла завершается с ошибкой, но сведения о файле печатает
-  const info = await new Promise((resolve) => {
-    const p = spawn(FFMPEG, ["-hide_banner", "-i", file], { windowsHide: true });
-    let e = "";
-    p.stderr.on("data", (d) => { e += d; });
-    p.on("close", () => resolve(e));
-    p.on("error", () => resolve(""));
-  });
+  const { err: info, timedOut } = await briefRun(["-i", file], { signal, timeout });
+  if (timedOut) throw new Error(NOT_READABLE);
   const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(info);
   if (!m) throw new Error("Не удалось прочитать файл — он повреждён или это не видео");
   if (!/Stream #.*Audio:/.test(info)) throw new Error("В видео нет звуковой дорожки — переводить нечего");
@@ -129,15 +144,12 @@ export async function probe(file) {
  * её возвращаем явно, до сэмпла (shift), чтобы оригинал стоял там же, где в видео. Читает только начало файла.
  * @param start — начало файла из probe()
  */
-export async function audioOffset(file, start) {
-  const out = await new Promise((resolve) => {
-    const p = spawn(FFMPEG, ["-hide_banner", "-v", "error", "-copyts", "-i", file, "-map", "0:a:0", "-frames:a", "1",
-      "-f", "framecrc", "-"], { windowsHide: true });
-    let o = "";
-    p.stdout.on("data", (d) => { o += d; });
-    p.on("close", () => resolve(o));
-    p.on("error", () => resolve(""));
-  });
+export async function audioOffset(file, start, signal, timeout = 60_000) {
+  const { out: raw, timedOut } = await briefRun(["-v", "error", "-copyts", "-i", file, "-map", "0:a:0", "-frames:a", "1",
+    "-f", "framecrc", "-"], { signal, timeout });
+  // первый кадр звука не читается минуту — с файлом что-то не так (недокачан), копия его всё равно не прочтёт
+  if (timedOut) throw new Error(NOT_READABLE);
+  const out = raw.toString();
   const tb = /#tb 0: (\d+)\/(\d+)/.exec(out);
   const frame = /^0,\s*-?\d+,\s*(-?\d+),/m.exec(out); // поток, dts, pts, …
   if (!tb || !frame) return 0;

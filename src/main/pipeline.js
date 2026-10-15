@@ -154,7 +154,7 @@ export async function runJob(job, { getOptions, token, mode = "translate", makeD
     let saveNote = "";
     const notes = []; // в каком формате сохранили и почему — в подпись шага
     // звук оригинала (кодек, битрейт, каналы): дорожку с переводом кодируем не хуже него
-    const src = await probe(file);
+    const src = await probe(file, signal);
     const mixOpts = { ...options, origLoudness: job.origLoudness ?? null, origProfile: job.origProfile ?? null,
       voiceAnalysis: result.analysis, origInfo: src.audio, origOffset: job.origOffset ?? 0 };
     try {
@@ -382,7 +382,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
     throw uploadBlock.error;
   }
   step("light", { state: "active", detail: "Проверяем видео" });
-  const { duration, audioCopyable, start, audio } = await probe(job.file);
+  const { duration, audioCopyable, start, audio } = await probe(job.file, signal);
   job.duration = duration;
   // переводчик Яндекса берёт видео не длиннее 4 часов (выяснил пользователь, 15.10) — не тратим чтение
   // исходника и месячный лимит загрузки Диска на то, что всё равно не переведётся
@@ -400,7 +400,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   mkdirSync(path.dirname(origOut), { recursive: true });
   // задержка звука относительно картинки (читает только начало файла): копия звука её теряет — облегчённая
   // копия и сведение возвращают её сами
-  job.origOffset = await audioOffset(job.file, start);
+  job.origOffset = await audioOffset(job.file, start, signal);
   const releaseDisk = await waitDiskTurn(step, "light", signal, lightTurn);
   try {
     step("light", { state: "active", detail: "0%" });
