@@ -47,16 +47,20 @@ add a video, press "Start", get the translated video.
 ## Features
 
 - **Voice-over** — the original sound is lowered while the translation speaks and plays at full volume in pauses.
-- **Lively voices** — translation voices that sound like the original speakers (English only).
+- **Lively voices** — translation voices that sound like the original speakers (English only; if the video speaks
+  another language, the app translates it with regular voices and auto-detection by itself).
 - **10 source languages** with auto-detection: English, German, French, Spanish, Italian, Japanese,
   Chinese, Korean, Arabic. The app warns you if the language is set wrong.
 - **No censorship** — translates any video.
 - **Queue** — add whole folders, reorder by drag-and-drop, press "Start all". Already translated videos are skipped.
   Video thumbnails like in Windows Explorer and a "Show in folder" button; progress counter and overall bar (stays
   visible while you scroll the list), "Cancel all", "Clear". Stays smooth even with a hundred videos.
+  The list can be **kept between launches** — unfinished videos continue by themselves; the app can **shut down
+  the PC when the queue is done**.
 - **Several videos at once** — up to 8 translated by Yandex simultaneously; preparing light copies and assembling
   finished videos also run in parallel without waiting for each other, so new videos head to Yandex while others
-  are being assembled. A "one at a time" mode is there for slow PCs and hard drives (HDD).
+  are being assembled. A "one at a time" mode is there for slow PCs and hard drives (HDD). Audio is encoded
+  **on all CPU cores**: the track of a two-hour video takes tens of seconds, not minutes.
 - **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.
 - **16 formats**: MP4, MKV, MOV, AVI, WebM, M4V, WMV, FLV, TS, MPG, MPEG, M2TS, MTS, 3GP, VOB, OGV.
   The result is saved in the same format as the source (or always MKV — your choice).
@@ -68,7 +72,7 @@ add a video, press "Start", get the translated video.
   (for players with external tracks), the translation voice `.mp3`, subtitles `.srt`. Defaults are set in the
   settings and can be changed for any single video in its card.
 - **Privacy** — only the audio goes to the Disk (the picture is replaced by a black frame), the copy is private
-  and removed afterwards. The app's log contains no video names.
+  and removed once the video leaves the list or the app is closed. The app's log contains no video names.
 
 ## Installation
 
@@ -119,6 +123,14 @@ Finished files are saved next to the source video (or in the chosen folder) with
 
 - **The Yandex translator API is unofficial.** If Yandex changes something, translation may stop working
   until the app is updated.
+- **Videos up to 4 hours** — a limit of the Yandex translator. Longer videos are marked with an error right away
+  (nothing is uploaded); you can cut them into parts.
+- **Yandex Disk monthly upload limit.** Within 30 days of the first upload you can upload at most twice your Disk
+  size: 10 GB on the free 5 GB plan. The app compresses the audio it sends to Yandex, so the copy of a two-hour
+  video is about 85 MB — roughly 120 such videos a month. Mail attachments and phone photo auto-upload count too.
+  When the limit is reached, the app says so: wait until it resets (30 days after the first upload), sign in with
+  another Yandex account or get more Disk space. The free plan also limits a single file to 1 GB; copies of videos
+  up to 4 hours fit.
 - **Lively voices** are available for English only; if they fail, the app translates with regular voices.
 - **To revoke the app's access** to your account, use [Yandex ID](https://id.yandex.ru) — in the list of apps
   you have allowed access.
@@ -135,6 +147,7 @@ You need [Node.js](https://nodejs.org) 24 and the keys of your own app from [oau
 npm install
 copy .env.example .env      # fill in YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET
 npm start                   # run from source
+npm test                    # checks (tests/): ~30 s, no Yandex account or keys needed
 npm run dist                # installer and portable version in the dist folder
 ```
 

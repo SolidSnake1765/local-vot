@@ -645,6 +645,24 @@ $("cancelAll").onclick = async () => {
   });
   if (ok) api.cancelAll();
 };
+// выключить компьютер после очереди: галочка — только на этот запуск (main её не сохраняет)
+$("shutdownAfter").onchange = () => api.setShutdownAfter($("shutdownAfter").checked);
+// очередь закончилась: отсчёт ведёт main (таймеры свёрнутого окна замедляются), здесь — показ и отмена
+api.on("app:shutdown", async ({ seconds, keepQueue }) => {
+  $("shutdownAfter").checked = false;
+  let left = seconds;
+  const text = () => `Очередь закончилась. Компьютер выключится через ${left} с. `
+    + (keepQueue ? "Список видео сохранится до следующего запуска." : "Копии видео с Яндекс Диска программа перед этим уберёт сама.");
+  const tick = setInterval(() => {
+    left = Math.max(0, left - 1);
+    $("askText").textContent = text();
+  }, 1000);
+  // любой ответ (кнопка, Esc, клик мимо) — не выключать: случайно выключить хуже, чем случайно не выключить
+  await askUser({ title: "Выключение компьютера", text: text(), buttons: [{ label: "Не выключать", value: true, kind: "primary" }] });
+  clearInterval(tick);
+  api.cancelShutdown();
+});
+
 $("testNotification").onclick = async () => {
   const shown = await api.testNotification();
   if (!shown) showAddNote("Windows не показала уведомление — подробности в журнале («Папка логов»)", true);
@@ -824,3 +842,13 @@ $("openLogs").onclick = () => api.openLogs();
 $("dzFormats").textContent = info.videoExt.map((e) => e.toUpperCase()).join(", ");
 await initSettings();
 await refreshAccount();
+// список прошлого запуска (настройка «Сохранять список видео между запусками»): карточки с шагами,
+// файлами и прослушиванием; недоделанные main запускает после этого ответа
+for (const job of await api.listJobs()) {
+  createCard(job);
+  const card = cards.get(job.id);
+  for (const [step, st] of Object.entries(job.steps ?? {})) applyUpdate(card, { id: job.id, step, state: st.state ?? undefined, detail: st.detail });
+  applyUpdate(card, { id: job.id, state: job.state, outputs: job.outputs, hasTranslation: job.hasTranslation, preview: job.preview,
+    error: job.state === "error" ? job.error : "" });
+}
+updateCount();

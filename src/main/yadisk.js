@@ -9,8 +9,9 @@ const API = "https://cloud-api.yandex.net/v1/disk";
 const RETRY_DELAYS = [2_000, 5_000, 10_000];
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) return reject(new Error("Отменено"));
-  const t = setTimeout(resolve, ms);
-  signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Отменено")); }, { once: true });
+  const onAbort = () => { clearTimeout(t); reject(new Error("Отменено")); };
+  const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
 });
 
 // Диск режет загрузку через API до ~128 КиБ/с для видео, архивов и т.п. — скорость назначается

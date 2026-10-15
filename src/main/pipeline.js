@@ -260,6 +260,11 @@ export function origAudioPath(jobId) {
   return path.join(workRoot(), "cache", `${jobId}-orig.mka`);
 }
 
+/** Профиль громкости оригинала — для списка, сохранённого между запусками (persist.js). */
+export function profilePath(jobId) {
+  return path.join(workRoot(), "cache", `${jobId}-profile.f32`);
+}
+
 /** Откуда брать звук оригинала: из сохранённой копии (с её задержкой), если она есть, иначе из самого видео. */
 export function origAudio(job) {
   const p = origAudioPath(job.id);
@@ -412,6 +417,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   // перевода — и общая, и во времени (подстройка смотрит, насколько громок оригинал там, где звучит перевод)
   step("light", { detail: "Измеряем громкость" });
   job.origProfile = await loudnessProfile(origOut, signal);
+  rm(profilePath(job.id), { force: true }).catch(() => {}); // сохранённый для списка профиль прежней копии устарел
   job.origLoudness = job.origProfile?.integrated ?? null;
   step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
@@ -557,7 +563,7 @@ async function translateOnce(job, work, token, step, emit, signal) {
     if (job.diskPath) {
       emit({ step: "cleanup", state: "active", detail: "" });
       await disk.unpublish(token, job.diskPath)
-        .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске до выхода из приложения" }))
+        .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске, пока видео в списке" }))
         .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
     }
   }

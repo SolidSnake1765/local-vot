@@ -2,7 +2,7 @@
 // только к этим функциям.
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
-const EVENTS = ["auth:code", "job:update"];
+const EVENTS = ["auth:code", "job:update", "app:shutdown"];
 
 contextBridge.exposeInMainWorld("api", {
   info: () => ipcRenderer.invoke("app:info"),
@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("api", {
   pickFolder: () => ipcRenderer.invoke("dialog:pickFolder"),
 
   addJobs: (files) => ipcRenderer.invoke("jobs:add", files),
+  listJobs: () => ipcRenderer.invoke("jobs:list"),
   cancelJob: (id) => ipcRenderer.invoke("jobs:cancel", id),
   startJob: (id) => ipcRenderer.invoke("jobs:start", id),
   startAll: () => ipcRenderer.invoke("jobs:startAll"),
@@ -40,6 +41,8 @@ contextBridge.exposeInMainWorld("api", {
   clearJobs: (mode) => ipcRenderer.invoke("jobs:clear", mode),
   cancelAll: () => ipcRenderer.invoke("jobs:cancelAll"),
   testNotification: () => ipcRenderer.invoke("app:testNotification"),
+  setShutdownAfter: (on) => ipcRenderer.invoke("app:setShutdownAfter", on),
+  cancelShutdown: () => ipcRenderer.invoke("app:cancelShutdown"),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
   jobThumb: (id) => ipcRenderer.invoke("jobs:thumb", id),
   openVideo: (id) => ipcRenderer.invoke("jobs:openVideo", id),

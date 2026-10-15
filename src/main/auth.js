@@ -9,9 +9,11 @@ import { getCredentials } from "./config.js";
 
 const OAUTH = "https://oauth.yandex.ru";
 const tokenFile = () => path.join(app.getPath("userData"), "yandex-token.bin");
+// слушатель отмены снимается и после паузы: за 5 минут ожидания кода — 60 пауз
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  const t = setTimeout(resolve, ms);
-  signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Вход отменён")); }, { once: true });
+  const onAbort = () => { clearTimeout(t); reject(new Error("Вход отменён")); };
+  const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
 });
 
 // токен нужен каждому видео и каждому удалению копии с Диска — с диска читаем один раз, дальше из памяти
@@ -88,14 +90,18 @@ async function refresh(token) {
   return fresh;
 }
 
+// обновление токена — одно на всех: несколько видео спрашивают токен одновременно
+let refreshing = null;
+
 /** Действующий токен (при необходимости обновлённый) или null, если нужен вход. */
 export async function getToken() {
-  let token = loadToken();
+  const token = loadToken();
   if (!token) return null;
   const expiresAt = token.obtained_at + token.expires_in * 1000;
   if (Date.now() < expiresAt - 24 * 3600_000) return token.access_token;
-  token = token.refresh_token ? await refresh(token) : null;
-  return token?.access_token ?? null;
+  if (!token.refresh_token) return null;
+  refreshing ??= refresh(token).finally(() => { refreshing = null; });
+  return (await refreshing)?.access_token ?? null;
 }
 
 /** Имя пользователя и место на Диске — заодно проверка, что токен рабочий. */

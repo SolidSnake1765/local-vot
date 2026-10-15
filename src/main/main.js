@@ -6,9 +6,10 @@ import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
 import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
-import { readFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { readdir, rename, rm, stat } from "node:fs/promises";
-import { describeMix, origAudio, origAudioPath, reserveDiskTurn, runJob, STEPS, translationCacheDir, wakeDiskTurn } from "./pipeline.js";
+import { describeMix, origAudio, origAudioPath, profilePath, reserveDiskTurn, runJob, STEPS, translationCacheDir, wakeDiskTurn } from "./pipeline.js";
+import { loadQueue, removeQueueFile, saveQueue, serializeJob } from "./persist.js";
 import { grabFrame, probe, renderPreview, setTempDir } from "./media.js";
 import { limiter } from "./limit.js";
 import { stopThumbHelper, windowsThumb } from "./thumbs.js";
@@ -40,7 +41,10 @@ const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts"
   "mpg", "mpeg", "m2ts", "mts", "3gp", "vob", "ogv"];
 
 let win = null;
-const send = (channel, payload) => win?.webContents.send(channel, payload);
+const send = (channel, payload) => {
+  win?.webContents.send(channel, payload);
+  if (channel === "job:update" && (payload?.state || payload?.outputs)) schedulePersist();
+};
 
 // ---------- очередь: до parallelJobs видео одновременно, копия и сборка — по настройке diskJobs (см. pipeline.js) ----------
 // job: { id, file, name, state, controller, lively, lang, diskPath, duration, voiceUsed, langUsed, outputs, replace }
@@ -93,6 +97,8 @@ function enqueue(job, mode = "translate", replace = false) {
   job.mode = mode;
   job.replace = replace;
   job.state = "queued";
+  job.steps = {};
+  job.error = "";
   queue.push(job);
   sortQueue();
   send("job:update", { id: job.id, state: "queued", reset: true });
@@ -117,6 +123,7 @@ const parallelLimit = () => Math.min(8, Math.max(1, Number(loadSettings().parall
  * «Копия и сборка».
  */
 function pump() {
+  if (holdQueue) return;
   while (slots.size < parallelLimit() && queue.length) {
     const job = queue.shift();
     slots.add(job.id);
@@ -153,6 +160,11 @@ async function runOne(job) {
     const freeSlot = () => { if (slots.delete(job.id)) pump(); };
     const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
+      // последнее состояние и подпись каждого шага — чтобы восстановленная карточка выглядела так же
+      if (patch.step) {
+        const prev = job.steps?.[patch.step] ?? {};
+        job.steps = { ...job.steps, [patch.step]: { state: patch.state ?? prev.state ?? null, detail: patch.detail ?? prev.detail ?? "" } };
+      }
       progress.push(patch);
     }, job.controller.signal);
     const { outputs, lively, lang } = await run;
@@ -175,6 +187,7 @@ async function runOne(job) {
   } catch (e) {
     progress?.flush();
     job.state = job.controller.signal.aborted ? "cancelled" : "error";
+    job.error = job.state === "error" ? e.message : "";
     if (job.state === "cancelled") log.info(scope, `отменено через ${Math.round((Date.now() - t0) / 1000)} с`);
     else {
       log.error(scope, e);
@@ -198,9 +211,57 @@ async function runOne(job) {
       if (done + failed > 1) {
         notify("Очередь переведена", `Готово: ${done}${failed ? ` · с ошибкой: ${failed}` : ""}`);
       }
+      // всё отменили сами — значит, человек у компьютера, выключать не надо
+      if (shutdownAfter && done + failed > 0) startShutdownCountdown();
     }
   }
 }
+
+// ---------- выключить компьютер, когда очередь закончится ----------
+// Галочка — только на этот запуск (в настройки не пишется: компьютер не должен выключиться в другой раз
+// неожиданно). Отсчёт ведёт главный процесс: таймеры свёрнутого окна Chromium замедляет до раза в минуту.
+// Перед выключением — то же, что при закрытии: копии с Диска, временные файлы.
+// проверки (tests/app.test.mjs) укорачивают отсчёт — только при запуске из исходников
+const SHUTDOWN_SECONDS = (!app.isPackaged && Number(process.env.LOCAL_VOT_SHUTDOWN_SECONDS)) || 60;
+let shutdownAfter = false;
+let shutdownTimer = null;
+
+function startShutdownCountdown() {
+  shutdownAfter = false;
+  clearTimeout(shutdownTimer);
+  log.info("выключение", `очередь закончилась — компьютер выключится через ${SHUTDOWN_SECONDS} с, если не отменить`);
+  send("app:shutdown", { seconds: SHUTDOWN_SECONDS, keepQueue: Boolean(loadSettings().keepQueue) });
+  win?.flashFrame(true);
+  shutdownTimer = setTimeout(shutdownComputer, SHUTDOWN_SECONDS * 1000);
+}
+
+async function shutdownComputer() {
+  shutdownTimer = null;
+  log.info("выключение", "выключаем компьютер");
+  await shutdown();
+  // проверка без настоящего выключения
+  if (process.env.LOCAL_VOT_DRY_SHUTDOWN) {
+    log.info("выключение", "(проверка: компьютер не выключается)");
+  } else {
+    // 10 с — программа успеет закрыться сама; Windows покажет своё предупреждение
+    await promisify(execFile)("shutdown", ["/s", "/t", "10", "/c", "Local VOT: очередь переведена — компьютер выключается"],
+      { windowsHide: true }).catch((e) => log.error("выключение", "Windows не приняла команду выключения", e));
+  }
+  quittingAfterShutdown = true; // уборка уже сделана — закрытие окна не должно делать её второй раз
+  app.quit();
+}
+let quittingAfterShutdown = false;
+
+ipcMain.handle("app:setShutdownAfter", (_e, on) => {
+  shutdownAfter = Boolean(on);
+  log.info("выключение", on ? "выключить компьютер после очереди — включено" : "выключить компьютер после очереди — выключено");
+});
+ipcMain.handle("app:cancelShutdown", () => {
+  if (!shutdownTimer) return;
+  clearTimeout(shutdownTimer);
+  shutdownTimer = null;
+  log.info("выключение", "отменено");
+});
 
 /**
  * На Яндекс Диске не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
@@ -219,6 +280,79 @@ async function makeDiskRoom() {
   if (removed) log.info("Диск", `не хватало места — убраны копии готовых видео: ${removed}`);
   return removed;
 }
+
+// ---------- список видео между запусками (настройка keepQueue, см. persist.js) ----------
+// Сохраняем через 3 с после изменения (событий бывает много подряд, а в списке из сотни видео — мегабайты)
+// и по очереди — записи не пересекаются.
+let persistTimer = null;
+let persistChain = Promise.resolve();
+// восстановленные недоделанные видео ждут, пока окно покажет список: иначе свежие события карточки пришли бы
+// раньше сохранённых шагов и были бы ими затёрты
+let holdQueue = false;
+
+function schedulePersist() {
+  if (!loadSettings().keepQueue) return;
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => persistNow(), 3000);
+}
+
+function persistNow() {
+  clearTimeout(persistTimer);
+  persistTimer = null;
+  persistChain = persistChain.then(async () => {
+    const list = order.map((id) => jobs.get(id)).filter(Boolean);
+    await saveQueue(list.map((j) => serializeJob(j, profilePath(j.id))), order);
+  }).catch((e) => log.warn("очередь", "список видео не сохранён", e));
+  return persistChain;
+}
+
+/** Временная папка прошлого запуска: всё, кроме кэша восстановленных видео (их переводы и звук оригинала). */
+function cleanWorkRoot(keepIds) {
+  const root = workRoot();
+  const cache = path.join(root, "cache");
+  try {
+    if (!keepIds.length) {
+      rmSync(root, { recursive: true, force: true });
+      return;
+    }
+    for (const name of readdirSync(root)) if (name !== "cache") rmSync(path.join(root, name), { recursive: true, force: true });
+    for (const name of readdirSync(cache)) {
+      if (!keepIds.some((id) => name.startsWith(id))) rmSync(path.join(cache, name), { recursive: true, force: true });
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") log.warn("запуск", "временные файлы прошлого запуска убраны не все", e);
+  }
+}
+
+/** Видео прошлого запуска — в список; недоделанные — в очередь (продолжатся, когда окно покажет список). */
+function restoreJobs(saved) {
+  for (const rec of saved.jobs) {
+    const job = { ...rec, controller: new AbortController(), no: ++jobCounter };
+    if (job.state !== "queued" || (job.mode === "remux" && !job.translation)) job.mode = "translate";
+    job.mode ??= "translate";
+    hideVideo(job.file, job.no);
+    jobs.set(job.id, job);
+  }
+  order = [...new Set([...saved.order.filter((id) => jobs.has(id)), ...jobs.keys()])];
+  for (const id of order) if (jobs.get(id).state === "queued") queue.push(jobs.get(id));
+  holdQueue = queue.length > 0;
+  // окно не спросило список (сбой интерфейса) — не держим очередь вечно
+  if (holdQueue) setTimeout(() => { holdQueue = false; pump(); }, 15_000);
+  log.info("очередь", `восстановлено видео: ${jobs.size}${queue.length ? `, продолжаются: ${queue.length}` : ""}`);
+}
+
+// окно при запуске: восстановленный список (карточки с шагами, файлами и прослушиванием)
+ipcMain.handle("jobs:list", () => {
+  const list = order.map((id) => jobs.get(id)).filter(Boolean).map((j) => ({
+    ...publicJob(j), outputs: j.outputs ?? [], hasTranslation: Boolean(j.translation), preview: previewInfo(j), error: j.error ?? "",
+    steps: j.state === "queued" ? null : (j.steps ?? null),
+  }));
+  if (holdQueue) {
+    holdQueue = false;
+    setTimeout(pump, 0); // после ответа окну
+  }
+  return list;
+});
 
 // ---------- уведомления Windows ----------
 // Имя программы для Windows (AppUserModelID). У установленной оно же стоит на ярлыке в «Пуске».
@@ -410,6 +544,7 @@ async function addJobs(paths) {
     added.push(publicJob(job));
   }
   queueMicrotask(pump);
+  schedulePersist();
   const note = [];
   if (skipped.translated) note.push(`уже переведены: ${skipped.translated}`);
   if (skipped.inList) note.push(`уже в списке: ${skipped.inList}`);
@@ -457,6 +592,7 @@ ipcMain.handle("jobs:setSound", (_e, id, patch) => {
   if (!job) return;
   const clean = Object.fromEntries(Object.entries(patch ?? {}).filter(([k]) => SOUND_KEYS.includes(k)));
   job.sound = { ...(job.sound ?? pickSound(loadSettings())), ...clean };
+  schedulePersist();
 });
 
 // ---------- что сохранять для видео ----------
@@ -474,6 +610,7 @@ ipcMain.handle("jobs:setSave", (_e, id, patch) => {
     const clean = Object.fromEntries(Object.entries(patch ?? {}).filter(([k]) => SAVE_KEYS.includes(k)));
     job.save = { ...(job.save ?? pickSave(loadSettings())), ...clean };
   }
+  schedulePersist();
   return job.save;
 });
 
@@ -508,6 +645,7 @@ function removeTranslationCache(job) {
   // не ждём: удаление сотен мегабайт не должно задерживать окно (при выходе папку всё равно уберёт shutdown)
   rm(translationCacheDir(job.id), { recursive: true, force: true }).catch(() => {});
   rm(origAudioPath(job.id), { force: true }).catch(() => {});
+  rm(profilePath(job.id), { force: true }).catch(() => {});
 }
 
 /** permanently — мимо Корзины Диска независимо от настройки (Корзина тоже занимает место на Диске). */
@@ -522,19 +660,36 @@ async function removeDiskCopy(job, { permanently = null } = {}) {
   await disk.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
 }
 
-/** Останавливает всё, ждёт идущие задания (не дольше 20 с) и убирает копии с Диска. */
+/**
+ * Останавливает всё и ждёт идущие задания (не дольше 20 с). Дальше — по настройке keepQueue:
+ * выключена — убирает копии с Диска и всю временную папку; включена — сохраняет список (идущие и ждущие
+ * видео продолжатся при следующем запуске), копии на Диске и кэш переводов оставляет.
+ */
 async function shutdown() {
-  log.info("выход", `закрытие программы; видео в списке: ${jobs.size}${running.size ? `, идёт перевод: ${running.size} — прерываем` : ""}`);
+  const keep = Boolean(loadSettings().keepQueue);
+  log.info("выход", `закрытие программы; видео в списке: ${jobs.size}${running.size ? `, идёт перевод: ${running.size} — прерываем` : ""}`
+    + (keep ? "; список сохраняется" : ""));
+  // недоделанные продолжатся при следующем запуске — тем же делом (идущее после отмены станет «отменено»,
+  // а его mode сбросится на перевод — запоминаем до отмены)
+  for (const j of jobs.values()) {
+    if (["queued", "running"].includes(j.state)) Object.assign(j, { resume: true, resumeMode: j.mode });
+  }
   queue.length = 0;
   for (const j of jobs.values()) j.controller.abort();
   if (running.size) {
     await Promise.race([Promise.all(running.values()), new Promise((r) => setTimeout(r, 20_000))]);
   }
+  await stopThumbHelper(); // его служебные файлы — во временной папке
+  if (keep) {
+    await persistNow();
+    cleanWorkRoot([...jobs.keys()]);
+    return;
+  }
+  removeQueueFile();
   await Promise.race([
     Promise.all([...jobs.values()].map(removeDiskCopy)),
     new Promise((r) => setTimeout(r, 20_000)),
   ]);
-  await stopThumbHelper(); // его служебные файлы — во временной папке
   await rm(workRoot(), { recursive: true, force: true, maxRetries: 3 }).catch((e) => log.warn("выход", "временная папка убрана не вся", e));
 }
 
@@ -621,6 +776,10 @@ ipcMain.handle("settings:set", (_e, patch) => {
   const next = saveSettings(patch);
   if (patch && "parallelJobs" in patch) pump();
   if (patch && "diskJobs" in patch) wakeDiskTurn();
+  if (patch && "keepQueue" in patch) {
+    if (patch.keepQueue) persistNow();
+    else removeQueueFile();
+  }
   return next;
 });
 // ошибки окна (интерфейса) — в тот же журнал
@@ -686,15 +845,18 @@ ipcMain.handle("jobs:reorder", (_e, ids) => {
   const known = ids.filter((id) => jobs.has(id));
   order = [...new Set([...known, ...order.filter((id) => jobs.has(id))])];
   sortQueue();
+  schedulePersist();
 });
 // голос для видео: пока перевод не начался — просто запоминаем; после — интерфейс предложит пересоздать
 ipcMain.handle("jobs:setVoice", (_e, id, lively) => {
   const job = jobs.get(id);
   if (job) job.lively = Boolean(lively);
+  schedulePersist();
 });
 ipcMain.handle("jobs:setLang", (_e, id, lang) => {
   const job = jobs.get(id);
   if (job && SOURCE_LANGS.some((l) => l.code === lang)) job.lang = lang;
+  schedulePersist();
 });
 // ещё один запрос к Яндексу (новая ссылка → свежий перевод) текущим голосом видео. Те же голос и язык —
 // «Перевести заново»: новая версия заменяет прежнюю; другие — «Пересоздать»: прежняя остаётся
@@ -719,6 +881,7 @@ function dropJob(job) {
   order = order.filter((x) => x !== job.id);
   removeTranslationCache(job);
   removeDiskCopy(job);
+  schedulePersist();
 }
 
 ipcMain.handle("jobs:remove", async (_e, id) => {
@@ -839,7 +1002,8 @@ function createWindow() {
   let closing = false;
   win.on("close", async (e) => {
     const hasCopies = [...jobs.values()].some((j) => j.diskPath);
-    if (closing || (!running.size && queue.length === 0 && !hasCopies)) return;
+    // со «Сохранять список» — всегда через shutdown: он дописывает список (последние изменения ждут секунду)
+    if (closing || quittingAfterShutdown || (!running.size && queue.length === 0 && !hasCopies && !loadSettings().keepQueue)) return;
     e.preventDefault();
     if (running.size || queue.length) {
       const { response } = await dialog.showMessageBox(win, {
@@ -849,12 +1013,14 @@ function createWindow() {
         cancelId: 1,
         title: "Local VOT",
         message: "Идёт перевод. Закрыть приложение?",
-        detail: "Перевод прервётся, загруженные копии будут удалены с Яндекс Диска.",
+        detail: loadSettings().keepQueue
+          ? "Перевод прервётся и продолжится при следующем запуске программы."
+          : "Перевод прервётся, загруженные копии будут удалены с Яндекс Диска.",
       });
       if (response !== 0) return;
     }
     closing = true;
-    win.setTitle("Local VOT — убираем файлы с Диска…");
+    win.setTitle(loadSettings().keepQueue ? "Local VOT — сохраняем список…" : "Local VOT — убираем файлы с Диска…");
     await shutdown();
     win.close();
   });
@@ -872,13 +1038,12 @@ app.on("second-instance", () => {
 if (primary) app.whenReady().then(() => {
   log.info("запуск", `Local VOT ${app.getVersion()} (${isPortable() ? "портативная" : app.isPackaged ? "установленная" : "разработка"}), `
     + `Windows ${os.release()} ${process.arch}, Electron ${process.versions.electron}, ffmpeg встроенный`);
-  // временные файлы и сохранённые переводы прошлого запуска (если он завершился аварийно)
-  try {
-    rmSync(workRoot(), { recursive: true, force: true });
-  } catch (e) {
-    log.warn("запуск", "временные файлы прошлого запуска убраны не все", e);
-  }
+  // список прошлого запуска (настройка «Сохранять список видео») — до уборки: его кэш и копии на Диске остаются;
+  // остальное во временной папке (и всё, если списка нет) — от прошлого запуска, в том числе аварийного
+  const saved = loadSettings().keepQueue ? loadQueue() : null;
+  if (saved?.jobs.length) restoreJobs(saved);
+  cleanWorkRoot([...jobs.keys()]);
   createWindow();
-  purgeLeftovers();
+  purgeLeftovers(); // копии восстановленных видео не трогает: они в jobs
 });
 app.on("window-all-closed", () => app.quit());

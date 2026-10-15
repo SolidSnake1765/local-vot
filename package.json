@@ -1,12 +1,13 @@
 {
   "name": "local-vot",
   "productName": "Local VOT",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Закадровый перевод локальных видео через переводчик Яндекса",
   "main": "src/main/index.js",
   "type": "module",
   "scripts": {
     "start": "electron .",
+    "test": "node --test --experimental-test-module-mocks \"tests/*.test.mjs\"",
     "dist": "node scripts/embed-credentials.mjs && electron-builder --win --x64 --publish never && node scripts/pack-portable.mjs"
   },
   "author": {

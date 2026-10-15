@@ -27,17 +27,26 @@ const FINISHED = 1;
 const PART_CONTENT = 5;
 const TIMEOUT = 60 * 60_000; // самое долгое ожидание в журналах пользователя — 21 мин (27-мин видео)
 const POLL = 30_000; // как в vot-cli; remainingTime у Яндекса приблизительный
+const POLL_MIN = 5_000;
 
+/**
+ * Когда спросить Яндекс снова: раз в 30 с, но если он сам говорит, что осталось меньше, — к этому сроку
+ * (не чаще раза в 5 с): иначе готовый перевод в среднем лежал бы у Яндекса лишние ~15 с.
+ */
+export const nextPoll = (remainingSec) => (remainingSec > 0 ? Math.min(POLL, Math.max(POLL_MIN, remainingSec * 1000)) : POLL);
+
+// слушатель отмены снимается и по окончании паузы: опросов за час — больше сотни, и иначе они копились бы на сигнале
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  const t = setTimeout(resolve, ms);
-  signal?.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Отменено")); }, { once: true });
+  const onAbort = () => { clearTimeout(t); reject(new Error("Отменено")); };
+  const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
 });
 
 /**
  * Скачать готовую дорожку: перевод уже сделан, и сбой связи на скачивании не должен его терять — повторяем.
  * Ответ проверяем: страница ошибки вместо MP3 дальше дала бы непонятный сбой разбора звука.
  */
-async function download(url, signal) {
+export async function download(url, signal) {
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await fetch(url, { signal });
@@ -103,7 +112,7 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
     const left = res.remainingTime > 0 ? `, осталось ~${Math.ceil(res.remainingTime / 60)} мин` : "";
     onStatus(res.status === PART_CONTENT ? `Готова часть перевода, ждём остальное${left}` : `Яндекс переводит${left}`);
     if (Date.now() - started > TIMEOUT) throw new Error("Перевод не готов за час — попробуйте позже");
-    await sleep(POLL, signal);
+    await sleep(nextPoll(res.remainingTime), signal);
   }
 
   const own = responses.get(res.translationId) ?? {};

@@ -15,12 +15,20 @@ let portable = app.isPackaged && !existsSync(path.join(exeDir, `Uninstall ${app.
 // в Яндекс и свои временные файлы; иначе удаление установленной стирало бы данные разработки,
 // а запуск одной версии чистил бы временные файлы другой
 const DEV_NAME = "Local VOT (разработка)";
+// только для запуска из исходников: в собранной программе переменная окружения ничего не меняет
+const testDir = !app.isPackaged && process.env.LOCAL_VOT_DATA_DIR ? path.resolve(process.env.LOCAL_VOT_DATA_DIR) : null;
 
 /**
  * Вызывать до app.whenReady(): портативная версия — данные в папке data рядом с программой;
  * запуск из исходников — в %APPDATA%\Local VOT (разработка).
  */
 export function setupDataPaths() {
+  // проверки (tests/): всё — в отдельной папке, не задевая ни настоящих данных, ни запущенной программы
+  if (testDir) {
+    app.setPath("userData", path.join(testDir, "profile"));
+    app.setPath("sessionData", path.join(testDir, "profile"));
+    return;
+  }
   if (!app.isPackaged) {
     app.setPath("userData", path.join(app.getPath("appData"), DEV_NAME));
     return;
@@ -45,6 +53,7 @@ export const isPortable = () => portable;
 
 /** Папка для временных файлов и кэша переводов (очищается при запуске и выходе). */
 export function workRoot() {
+  if (testDir) return path.join(testDir, "temp");
   if (portable) return path.join(dataDir, "temp");
   return path.join(app.getPath("temp"), app.isPackaged ? "local-vot" : "local-vot-dev");
 }
