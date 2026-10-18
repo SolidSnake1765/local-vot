@@ -36,7 +36,7 @@ const early = new Map(); // id → события, ждущие своей ка�
 // ---------- облака: выбор, вход и выход ----------
 // Список облаков (название, описание, способ входа) приходит из главного процесса (clouds.js): новое облако
 // появляется здесь само — карточкой в окне «Облако», в шапке и во входе.
-let CLOUDS = []; // { id, title, who, login: "code" | "browser", lively, points }
+let CLOUDS = []; // { id, title, who, login: "code" | "browser", lively, points, recommended, tip }
 let accounts = {}; // id облака → { loggedIn, name, usedBytes, totalBytes }
 const cloudInfo = (id) => CLOUDS.find((c) => c.id === id) ?? CLOUDS[0];
 const voiceCloud = () => CLOUDS.find((c) => c.lively); // чей вход даёт живые голоса (Яндекс)
@@ -72,6 +72,7 @@ function buildCloudCards() {
     node.dataset.cloud = c.id;
     node.querySelector("input").value = c.id;
     node.querySelector(".cloud-opt-title").textContent = c.title;
+    node.querySelector(".cloud-rec").hidden = !c.recommended;
     const voiceLine = c.lively ? "Этот же вход даёт живые голоса."
       : `Живые голоса — только если войти и в ${voice.who} (в карточке «${voice.title}»). Без этого — обычные голоса.`;
     for (const text of [...c.points, voiceLine]) {
@@ -84,6 +85,9 @@ function buildCloudCards() {
     node.addEventListener("click", (e) => { if (!e.target.closest('[data-acc="btn"]')) chooseCloud(c.id); });
     $("cloudOptions").append(node);
   }
+  const rec = CLOUDS.find((c) => c.recommended && c.tip);
+  $("cloudTip").hidden = !rec;
+  if (rec) $("cloudTip").textContent = rec.tip;
 }
 
 /** Кнопка «Облако» и напоминание о живых голосах в шапке, карточки окна — по выбору и входам. */

@@ -186,11 +186,13 @@
         облегчённую копию — звук и чёрный кадр вместо картинки, — открывает к ней ссылку на время перевода и сразу
         закрывает. Копия удаляется вместе с видео из списка. Остальные ваши файлы в облаке программа не видит.
         Выберите облако — нажмите на его карточку.</p>
+      <p class="cloud-tip" id="cloudTip" hidden></p>
       <!-- карточки облаков строит app.js по списку облаков (clouds.js) -->
       <div class="cloud-options" id="cloudOptions"></div>
       <template id="cloudOptTpl">
         <section class="cloud-opt">
           <label class="cloud-opt-head"><input type="radio" name="cloud"> <span class="cloud-opt-title"></span>
+            <span class="cloud-rec" hidden>советуем</span>
             <span class="cloud-badge">выбрано</span></label>
           <ul></ul>
           <div class="cloud-acc">

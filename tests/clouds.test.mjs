@@ -25,6 +25,9 @@ test("у каждого облака — описание, способ вход
   }
   assert.equal(CLOUDS.filter((c) => c.lively).length, 1, "живые голоса даёт ровно одно облако");
   assert.equal(livelyCloud().id, "yandex");
+  const rec = CLOUDS.filter((c) => c.recommended);
+  assert.ok(rec.length <= 1, "советуем не больше одного облака");
+  assert.ok(rec.every((c) => typeof c.tip === "string" && c.tip.length > 20), "у советуемого — текст совета");
 });
 
 test("копия узнаёт своё облако; неизвестное — первое облако", () => {
@@ -37,7 +40,7 @@ test("копия узнаёт своё облако; неизвестное — 
 
 test("окну уходят только описания — без модулей и функций", () => {
   for (const c of publicClouds()) {
-    assert.deepEqual(Object.keys(c).sort(), ["id", "lively", "login", "points", "title", "who"]);
+    assert.deepEqual(Object.keys(c).sort(), ["id", "lively", "login", "points", "recommended", "tip", "title", "who"]);
     assert.doesNotThrow(() => structuredClone(c));
   }
 });

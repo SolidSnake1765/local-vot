@@ -111,7 +111,12 @@ h2 {
 
 /* окно облака */
 .modal-card.cloud-card { width: min(780px, 94vw); max-height: 92vh; overflow: auto; text-align: left; }
-.cloud-intro { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+.cloud-intro { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+/* совет, какое облако выбрать (облако с recommended в clouds.js) */
+.cloud-tip { margin: 0 0 14px; padding: 9px 12px; border-radius: 10px; font-size: 13px; color: var(--text);
+  background: rgba(95, 211, 154, .07); border: 1px solid rgba(95, 211, 154, .3); }
+.cloud-rec { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; color: var(--ok);
+  background: rgba(95, 211, 154, .08); border: 1px solid rgba(95, 211, 154, .3); }
 .cloud-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .cloud-opt {
   display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 14px; cursor: pointer;

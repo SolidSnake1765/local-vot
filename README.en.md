@@ -41,6 +41,11 @@ add a video, press "Start", get the translated video.
 > uses regular voices; for lively voices, sign in to Yandex once as well.
 
 > [!TIP]
+> **Best setup:** use **Google Drive** as the cloud and sign in to **Yandex** only for lively voices (both sign-ins
+> are in the «Облако» (Cloud) window). This way there is no Yandex Disk monthly upload limit (10 GB per 30 days),
+> and lively voices still work.
+
+> [!TIP]
 > Want translation right in the browser — for YouTube and other sites? Use the
 > [voice-over-translation](https://github.com/ilyhalight/voice-over-translation) extension.
 > Local VOT is for videos that are already on your computer.

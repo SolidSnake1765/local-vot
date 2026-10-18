@@ -13,7 +13,8 @@ import * as gdrive from "./gdrive.js";
  * login — как идёт вход: code (код на странице сервиса) или browser (страница входа в браузере);
  * lively — этот вход даёт живые голоса (они есть только у Яндекса — нужен его вход при любом облаке);
  * throttledBps — если сервис может резать скорость загрузки, примерная скорость для оценки времени;
- * points — описание в окне «Облако»; owns(ref) — копия (job.diskPath) лежит в этом облаке.
+ * points — описание в окне «Облако»; owns(ref) — копия (job.diskPath) лежит в этом облаке;
+ * recommended + tip — облако, которое советуем (пометка на карточке и совет над карточками; одно на весь список).
  */
 export const CLOUDS = [
   {
@@ -29,6 +30,9 @@ export const CLOUDS = [
   },
   {
     id: "google", title: "Google Диск", who: "Google", where: "на Google Диске", to: "на Google Диск", login: "browser", lively: false,
+    recommended: true,
+    tip: "Лучше всего: облако — Google Диск, а в Яндекс войти только ради живых голосов (кнопка в карточке «Яндекс Диск»). "
+      + "Так у загрузок нет месячного лимита Яндекс Диска, а живые голоса работают.",
     points: [
       "Нужен аккаунт Google. Месячного лимита загрузки нет, бесплатно — 15 ГБ места.",
       "Копии лежат в папке «Local VOT — копии для перевода».",
@@ -46,4 +50,5 @@ export const cloudOf = (ref) => CLOUDS.find((c) => c.owns(ref)) ?? CLOUDS[0];
 export const livelyCloud = () => CLOUDS.find((c) => c.lively);
 
 /** Что окну нужно знать об облаках (без модулей). */
-export const publicClouds = () => CLOUDS.map(({ id, title, who, login, lively, points }) => ({ id, title, who, login, lively, points }));
+export const publicClouds = () => CLOUDS.map(({ id, title, who, login, lively, points, recommended = false, tip = "" }) =>
+  ({ id, title, who, login, lively, points, recommended, tip }));
