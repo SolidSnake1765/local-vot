@@ -180,14 +180,16 @@ async function runOne(job) {
       if (!t) throw new Error(`Вход в ${cloud.who} устарел — войдите заново (кнопка «Облако» вверху)`);
       return t;
     };
-    const store = storeToken ? { id: cloud.id, where: cloud.where, throttledBps: cloud.throttledBps, api: cloud.api, getToken } : null;
+    const store = storeToken ? { id: cloud.id, where: cloud.where, to: cloud.to, throttledBps: cloud.throttledBps, api: cloud.api, getToken }
+      : null;
     const run = runJob(job, { getOptions, token, store, mode: job.mode, makeDiskRoom: () => makeDiskRoom(cloud), lightTurn,
       listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
       // последнее состояние и подпись каждого шага — чтобы восстановленная карточка выглядела так же
       if (patch.step) {
         const prev = job.steps?.[patch.step] ?? {};
-        job.steps = { ...job.steps, [patch.step]: { state: patch.state ?? prev.state ?? null, detail: patch.detail ?? prev.detail ?? "" } };
+        job.steps = { ...job.steps, [patch.step]: { state: patch.state ?? prev.state ?? null, detail: patch.detail ?? prev.detail ?? "",
+          ...((patch.title ?? prev.title) ? { title: patch.title ?? prev.title } : {}) } };
       }
       progress.push(patch);
     }, job.controller.signal);

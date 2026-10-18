@@ -16,6 +16,7 @@ test("у каждого облака — описание, способ вход
   for (const c of CLOUDS) {
     for (const k of ["id", "title", "who", "where"]) assert.equal(typeof c[k], "string", `${c.id}.${k}`);
     assert.match(c.where, /^на /, `${c.id}.where — «на …»`);
+    assert.match(c.to, /^на /, `${c.id}.to — «на …»`);
     assert.ok(["code", "browser"].includes(c.login), `${c.id}.login`);
     assert.ok(Array.isArray(c.points) && c.points.length > 0, `${c.id}.points`);
     for (const f of STORAGE) assert.equal(typeof c.api[f], "function", `${c.id}.api.${f}`);

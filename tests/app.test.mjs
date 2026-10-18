@@ -82,7 +82,8 @@ test("список видео между запусками: восстанов�
   copyFileSync(voice, path.join(cache, id(1), "voice.ru.mp3"));
   mkdirSync(path.join(dir, "temp", "work-old"), { recursive: true });
   writeFileSync(path.join(cache, "deadbeef-orig.mka"), "мусор прошлого запуска");
-  const steps = { light: { state: "done", detail: "Громкость оригинала -19.3 LUFS" }, translate: { state: "done", detail: "Обычные голоса" },
+  const steps = { light: { state: "done", detail: "Громкость оригинала -19.3 LUFS" },
+    upload: { state: "done", detail: "1 МБ за 1 с", title: "Загрузка на Google Диск" }, translate: { state: "done", detail: "Обычные голоса" },
     save: { state: "done", detail: "Оригинал 30% под переводом" } };
   const job = { file: video, name: "clip.mp4", lively: false, lang: "auto", diskPath: null, duration: 8, outputs: [], save: null,
     sound: null, savedSound: null, origOffset: 0, origLoudness: -19, steps: null, error: "", mode: "translate", replace: false, translation: null };
@@ -110,6 +111,10 @@ test("список видео между запусками: восстанов�
     assert.equal(done.state, "done");
     assert.deepEqual([done.outputs, done.preview], [1, true], "готовое — с файлом и прослушиванием");
     assert.match(done.steps.join(" | "), /done:Громкость оригинала -19\.3 LUFS/);
+    // шаг загрузки назван по облаку видео; у нетронутого видео — общее название
+    const uploadTitle = (n) => app.evaluate(`document.querySelector('.job[data-id="${id(n)}"] .step:nth-child(2) .step-title').textContent`);
+    assert.equal(await uploadTitle(1), "Загрузка на Google Диск");
+    assert.equal(await uploadTitle(3), "Загрузка в облако");
     assert.equal(resumed.state, "error", "недоделанное продолжилось (без входа — ошибка)");
     assert.match(resumed.error, /Войдите в Яндекс/);
     assert.equal(failed.error, "Речь в видео не похожа на английский.");

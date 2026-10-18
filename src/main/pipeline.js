@@ -59,7 +59,7 @@ async function waitDiskTurn(step, stepId, signal, ticket = null, priority = Infi
 
 export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
-  { id: "upload", title: "Загрузка на Диск" },
+  { id: "upload", title: "Загрузка в облако" },
   { id: "translate", title: "Перевод" },
   { id: "cleanup", title: "Закрытие ссылки" },
   { id: "save", title: "Сохранение результата" },
@@ -92,11 +92,12 @@ const MAX_DURATION_SEC = 4 * 3600; // предел переводчика Янд
 export async function runJob(job, { getOptions, token, store = null, mode = "translate", makeDiskRoom, lightTurn = null,
   listPosition = () => Infinity, freeSlot = () => {} }, emit, signal) {
   const { file } = job;
-  // куда грузить копию — облако из clouds.js: { id, where, throttledBps, api, getToken } (по умолчанию Яндекс Диск).
+  // куда грузить копию — облако из clouds.js: { id, where, to, throttledBps, api, getToken } (по умолчанию Яндекс Диск).
   // Ключ входа облака берём заново перед каждым действием: у Google он живёт час, а видео может ждать очереди
   // и перевода дольше — со старым ключом не закрылась бы ссылка. token отдельно — вход в Яндекс: для живых
   // голосов (с другим облаком его может и не быть)
-  const st = store ?? { id: "yandex", where: "на Яндекс Диске", throttledBps: 130_000, api: disk, getToken: async () => token };
+  const st = store ?? { id: "yandex", where: "на Яндекс Диске", to: "на Яндекс Диск", throttledBps: 130_000, api: disk,
+    getToken: async () => token };
   const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
@@ -120,9 +121,11 @@ export async function runJob(job, { getOptions, token, store = null, mode = "tra
       emit({ step: "translate", state: "done", detail: "Берём уже полученный перевод — без запроса к Яндексу" });
       emit({ step: "cleanup", state: "done", detail: "" });
     } else {
+      // шаг загрузки — с названием облака этого видео (по умолчанию в списке шагов — «Загрузка в облако»)
+      emit({ step: "upload", title: `Загрузка ${st.to}` });
       if (job.diskPath) {
         emit({ step: "light", state: "done", detail: "" });
-        emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
+        emit({ step: "upload", state: "done", detail: `Файл уже ${st.where}` });
       } else {
         await uploadCopy(job, work, st, step, signal, makeDiskRoom, lightTurn);
       }
@@ -579,7 +582,7 @@ async function translateOnce(job, work, st, token, step, emit, signal) {
       emit({ step: "cleanup", state: "active", detail: "" });
       // перевод мог идти почти час — ключ входа свежий, иначе ссылка осталась бы открытой
       await st.getToken().then((t) => st.api.unpublish(t, job.diskPath))
-        .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске, пока видео в списке" }))
+        .then(() => emit({ step: "cleanup", state: "done", detail: `Ссылка закрыта · копия ${st.where}, пока видео в списке` }))
         .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
     }
   }

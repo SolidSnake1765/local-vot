@@ -174,7 +174,7 @@ test("Google Диск: копия туда и ссылка оттуда; без 
   };
   // ключ Google живёт час — каждое действие с облаком берёт свежий (здесь: g1, g2, …)
   let fresh = 0;
-  const store = { id: "google", where: "на Google Диске", api, getToken: async () => `g${++fresh}` };
+  const store = { id: "google", where: "на Google Диске", to: "на Google Диск", api, getToken: async () => `g${++fresh}` };
   const t = await run({ lively: true, lang: "en" }, { token: null, store });
   assert.equal(t.ok, true, t.error);
   assert.equal(calls.upload, 0, "Яндекс Диск не трогали");
@@ -188,6 +188,8 @@ test("Google Диск: копия туда и ссылка оттуда; без 
   assert.equal(t.job.lively, true, "пометка «живые» остаётся — после входа можно пересоздать");
   assert.match(t.card.findLast((p) => p.step === "translate" && p.state === "done").detail, /войдите в Яндекс/);
   assert.match(t.card.find((p) => p.step === "upload" && p.state === "active").detail, /Google Диске/);
+  assert.equal(t.card.find((p) => p.step === "upload" && p.title)?.title, "Загрузка на Google Диск", "шаг назван по облаку");
+  assert.equal(t.card.find((p) => p.step === "upload" && p.title).state, undefined, "название — до начала шагов, без смены состояния");
   // со входом в Яндекс — живые голоса и с Google Диском
   const t2 = await run({ lively: true, lang: "en" }, { token: "y", store });
   assert.equal(t2.ok, true, t2.error);

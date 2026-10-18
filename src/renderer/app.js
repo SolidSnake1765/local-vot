@@ -555,17 +555,19 @@ function refreshActions(card) {
 
 /** Повторный запуск: шаги снова «не начаты», прежние результаты остаются в списке. */
 function resetSteps(card) {
-  for (const li of Object.values(card.steps)) {
+  for (const [id, li] of Object.entries(card.steps)) {
     li.classList.remove("active", "done", "error");
+    li.querySelector(".step-title").textContent = STEPS.find((s) => s.id === id)?.title ?? "";
     li.querySelector(".step-detail").textContent = "";
     li.querySelector(".bar").hidden = true;
   }
   card.node.querySelector(".job-error").hidden = true;
 }
 
-function updateStep(card, { step, state, progress, detail }) {
+function updateStep(card, { step, state, progress, detail, title }) {
   const li = card.steps[step];
   if (!li) return;
+  if (title) li.querySelector(".step-title").textContent = title; // «Загрузка на Google Диск» — облако этого видео
   if (state) {
     li.classList.remove("active", "done", "error");
     li.classList.add(state);
@@ -958,7 +960,7 @@ await refreshAccount();
 for (const job of await api.listJobs()) {
   createCard(job);
   const card = cards.get(job.id);
-  for (const [step, st] of Object.entries(job.steps ?? {})) applyUpdate(card, { id: job.id, step, state: st.state ?? undefined, detail: st.detail });
+  for (const [step, st] of Object.entries(job.steps ?? {})) applyUpdate(card, { id: job.id, step, state: st.state ?? undefined, detail: st.detail, title: st.title });
   applyUpdate(card, { id: job.id, state: job.state, outputs: job.outputs, hasTranslation: job.hasTranslation, preview: job.preview,
     error: job.state === "error" ? job.error : "" });
 }
