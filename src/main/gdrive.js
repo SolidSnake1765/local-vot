@@ -62,14 +62,29 @@ async function api(token, method, url, { body, signal, ok404 = false } = {}) {
   }
 }
 
-/** Папка для копий: своя, созданная программой (её человек может и удалить — тогда создаём заново). */
-async function folder(token, signal) {
-  const found = await api(token, "GET", `${API}/files?q=${q("appProperties has { key='localvot' and value='folder' } and trashed=false")}`
-    + "&fields=files(id)&pageSize=1&spaces=drive", { signal });
-  if (found.files?.[0]) return found.files[0].id;
-  const created = await api(token, "POST", `${API}/files?fields=id`, { signal,
-    body: { name: FOLDER_NAME, mimeType: FOLDER_MIME, appProperties: { localvot: "folder" } } });
-  return created.id;
+// Папка для копий: своя, созданная программой. Ищем её один раз и запоминаем: несколько видео загружаются
+// сразу, и каждое, не найдя папку, создало бы свою (а только что созданную поиск Google находит не сразу).
+// Человек удалил папку или вошёл в другой аккаунт — загрузка получит 404 по старой папке, и upload найдёт заново.
+const FOLDER_TTL = 10 * 60_000;
+let folderCache = null; // { id, at }
+let folderPending = null; // идущий поиск — общий для всех, кто ждёт папку
+
+/** Забыть папку (проверки; после смены аккаунта она найдётся заново и так). */
+export function resetFolderCache() {
+  folderCache = null;
+}
+
+async function folder(token) {
+  if (folderCache && Date.now() - folderCache.at < FOLDER_TTL) return folderCache.id;
+  folderPending ??= (async () => {
+    const found = await api(token, "GET", `${API}/files?q=${q("appProperties has { key='localvot' and value='folder' } and trashed=false")}`
+      + "&fields=files(id)&pageSize=1&spaces=drive");
+    const id = found.files?.[0]?.id ?? (await api(token, "POST", `${API}/files?fields=id`,
+      { body: { name: FOLDER_NAME, mimeType: FOLDER_MIME, appProperties: { localvot: "folder" } } })).id;
+    folderCache = { id, at: Date.now() };
+    return id;
+  })().finally(() => { folderPending = null; });
+  return folderPending;
 }
 
 /** Отправляет файл в начатую загрузку (сессию) с отслеживанием прогресса; вернёт id файла. */
@@ -102,8 +117,10 @@ function putFile(session, file, onProgress, signal) {
 
 /** Загружает файл в папку копий, возвращает «gdrive:<id>». */
 export async function upload(token, file, onProgress, signal) {
-  const parent = await folder(token, signal);
+  let parent = await folder(token);
+  signal?.throwIfAborted();
   const size = statSync(file).size;
+  let refound = false;
   // обрыв связи или 5xx посреди загрузки — заново, с новой сессией; нехватка места — сразу
   for (let attempt = 0; ; attempt++) {
     try {
@@ -121,6 +138,14 @@ export async function upload(token, file, onProgress, signal) {
       return PREFIX + await putFile(res.headers.get("location"), file, onProgress, signal);
     } catch (e) {
       if (signal?.aborted) throw new Error("Отменено");
+      // запомненной папки больше нет (удалили, другой аккаунт) — найти или создать заново, один раз
+      if (e.status === 404 && !refound) {
+        refound = true;
+        folderCache = null;
+        parent = await folder(token);
+        attempt--;
+        continue;
+      }
       if (!(e.retry || e instanceof TypeError) || attempt >= RETRY_DELAYS.length) throw e;
       log.warn("Google Диск", `загрузка: ${e.message}, повтор ${attempt + 1}`);
       await sleep(RETRY_DELAYS[attempt], signal);

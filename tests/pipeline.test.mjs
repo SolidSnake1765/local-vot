@@ -172,19 +172,24 @@ test("Google Диск: копия туда и ссылка оттуда; без 
     unpublish: async (tok, ref) => { google.push(["unpublish", tok, ref]); },
     freeSpace: async () => 1e12,
   };
-  const t = await run({ lively: true, lang: "en" }, { token: null, store: { id: "google", where: "на Google Диске", api, token: "g" } });
+  // ключ Google живёт час — каждое действие с облаком берёт свежий (здесь: g1, g2, …)
+  let fresh = 0;
+  const store = { id: "google", where: "на Google Диске", api, getToken: async () => `g${++fresh}` };
+  const t = await run({ lively: true, lang: "en" }, { token: null, store });
   assert.equal(t.ok, true, t.error);
   assert.equal(calls.upload, 0, "Яндекс Диск не трогали");
   assert.equal(t.job.diskPath, "gdrive:F");
   assert.equal(world.lastUrl, "https://drive.google.com/file/d/F/view?t=1");
   assert.deepEqual(google.map((c) => c[0]), ["upload", "unpublish", "publish", "unpublish"]);
-  assert.ok(google.every((c) => c[1] === "g"), "везде вход Google");
+  assert.ok(google.every((c) => /^g\d+$/.test(c[1])), "везде вход Google");
+  assert.equal(google.at(-1)[1], `g${fresh}`, "ссылку закрывает самый свежий ключ, а не взятый в начале");
+  assert.equal(new Set(google.map((c) => c[1])).size, google.length, "ключ — заново перед каждым действием");
   assert.deepEqual(calls.translate, [{ lively: false, lang: "en" }], "живые голоса без входа в Яндекс не просим");
   assert.equal(t.job.lively, true, "пометка «живые» остаётся — после входа можно пересоздать");
   assert.match(t.card.findLast((p) => p.step === "translate" && p.state === "done").detail, /войдите в Яндекс/);
   assert.match(t.card.find((p) => p.step === "upload" && p.state === "active").detail, /Google Диске/);
   // со входом в Яндекс — живые голоса и с Google Диском
-  const t2 = await run({ lively: true, lang: "en" }, { token: "y", store: { id: "google", where: "на Google Диске", api, token: "g" } });
+  const t2 = await run({ lively: true, lang: "en" }, { token: "y", store });
   assert.equal(t2.ok, true, t2.error);
   assert.deepEqual(calls.translate.at(-1), { lively: true, lang: "en" });
 });

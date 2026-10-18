@@ -43,9 +43,8 @@ after(() => {
   globalThis.setTimeout = realTimeout;
   server.close();
 });
-beforeEach(() => { script = []; seen = []; puts = []; received = []; });
-
 const g = await import("../src/main/gdrive.js");
+beforeEach(() => { script = []; seen = []; puts = []; received = []; g.resetFolderCache(); });
 const err = (status, reason, message = reason) => ({ status, body: { error: { code: status, message, errors: [{ reason }] } } });
 
 test("загрузка: в папку программы, с пометкой; ход загрузки; итог — gdrive:<id>", async () => {
@@ -70,6 +69,28 @@ test("загрузка: папки нет (или её удалили) — со�
   assert.deepEqual(seen[1].body, { name: "Local VOT — копии для перевода", mimeType: "application/vnd.google-apps.folder",
     appProperties: { localvot: "folder" } });
   assert.deepEqual(seen[2].body.parents, ["NEW"]);
+});
+
+test("несколько загрузок сразу — одна папка на всех; дальше папка запомнена, без поиска", async () => {
+  script = [{ body: { files: [] } }, { body: { id: "ONE" } }, { session: "a" }, { session: "b" }, { session: "c" }];
+  puts = [{ body: '{"id":"A"}' }, { body: '{"id":"B"}' }, { body: '{"id":"C"}' }];
+  const [a, b] = await Promise.all([g.upload("tok", FILE), g.upload("tok", FILE)]);
+  assert.deepEqual([a, b].sort(), ["gdrive:A", "gdrive:B"]);
+  assert.equal(await g.upload("tok", FILE), "gdrive:C");
+  assert.equal(seen.filter((x) => x.body?.mimeType === "application/vnd.google-apps.folder").length, 1, "папка создана один раз");
+  assert.equal(seen.filter((x) => x.url.includes("/drive/v3/files?q=")).length, 1, "искали один раз");
+  assert.ok(seen.filter((x) => x.url.includes("uploadType=resumable")).every((x) => x.body.parents[0] === "ONE"));
+});
+
+test("запомненной папки больше нет (удалили, другой аккаунт) — находим заново и грузим", async () => {
+  script = [{ body: { files: [{ id: "OLD" }] } }, { session: "s0" }];
+  puts = [{ body: '{"id":"F0"}' }];
+  await g.upload("tok", FILE);
+  script = [err(404, "notFound", "File not found: OLD."), { body: { files: [] } }, { body: { id: "NEW" } }, { session: "s1" }];
+  puts = [{ body: '{"id":"F1"}' }];
+  seen = [];
+  assert.equal(await g.upload("tok", FILE), "gdrive:F1");
+  assert.deepEqual(seen.filter((x) => x.url.includes("uploadType=resumable")).map((x) => x.body.parents[0]), ["OLD", "NEW"]);
 });
 
 test("загрузка: сбой посреди (503) — заново, с новой сессией", async () => {

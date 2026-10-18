@@ -92,9 +92,11 @@ const MAX_DURATION_SEC = 4 * 3600; // предел переводчика Янд
 export async function runJob(job, { getOptions, token, store = null, mode = "translate", makeDiskRoom, lightTurn = null,
   listPosition = () => Infinity, freeSlot = () => {} }, emit, signal) {
   const { file } = job;
-  // куда грузить копию — облако из clouds.js: { id, where, throttledBps, api, token } (по умолчанию Яндекс Диск);
-  // token отдельно — вход в Яндекс: для живых голосов (с другим облаком его может и не быть)
-  const st = store ?? { id: "yandex", where: "на Яндекс Диске", throttledBps: 130_000, api: disk, token };
+  // куда грузить копию — облако из clouds.js: { id, where, throttledBps, api, getToken } (по умолчанию Яндекс Диск).
+  // Ключ входа облака берём заново перед каждым действием: у Google он живёт час, а видео может ждать очереди
+  // и перевода дольше — со старым ключом не закрылась бы ссылка. token отдельно — вход в Яндекс: для живых
+  // голосов (с другим облаком его может и не быть)
+  const st = store ?? { id: "yandex", where: "на Яндекс Диске", throttledBps: 130_000, api: disk, getToken: async () => token };
   const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
@@ -379,7 +381,7 @@ function diskFullError(e) {
 
 /** Облегчённая копия и загрузка её на Диск (st — см. runJob); заполняет job.diskPath и job.duration. */
 async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, lightTurn = null) {
-  const { token } = st;
+  let token = await st.getToken();
   if (uploadBlock?.token === token && Date.now() < uploadBlock.until) {
     step("upload", { state: "active", detail: "" });
     throw uploadBlock.error;
@@ -425,6 +427,7 @@ async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, ligh
   step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
   step("upload", { state: "active", detail: `Проверяем место ${st.where}` });
+  token = await st.getToken(); // копия могла делаться долго (очередь к диску) — ключ свежий
   const lightSize = (await stat(light)).size;
   const need = lightSize + 10 * MB;
   const releaseCheck = await spaceCheck.acquire(signal);
@@ -511,10 +514,10 @@ async function translateOnce(job, work, st, token, step, emit, signal) {
   let result;
   try {
     step("translate", { state: "active", detail: "Открываем доступ к файлу" });
-    await st.api.unpublish(st.token, job.diskPath).catch(() => {}); // вдруг осталась открытой с прошлого раза
+    await st.api.unpublish(await st.getToken(), job.diskPath).catch(() => {}); // вдруг осталась открытой с прошлого раза
     let url;
     try {
-      url = await st.api.publish(st.token, job.diskPath, signal);
+      url = await st.api.publish(await st.getToken(), job.diskPath, signal);
     } catch (e) {
       if (/\(404\)|не найден/i.test(e.message)) {
         job.diskPath = null; // копию удалили с Диска вручную — в следующий раз загрузим заново
@@ -574,7 +577,8 @@ async function translateOnce(job, work, st, token, step, emit, signal) {
     // что бы ни случилось — не оставляем файл висеть по открытой ссылке
     if (job.diskPath) {
       emit({ step: "cleanup", state: "active", detail: "" });
-      await st.api.unpublish(st.token, job.diskPath)
+      // перевод мог идти почти час — ключ входа свежий, иначе ссылка осталась бы открытой
+      await st.getToken().then((t) => st.api.unpublish(t, job.diskPath))
         .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске, пока видео в списке" }))
         .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
     }

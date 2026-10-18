@@ -174,7 +174,13 @@ async function runOne(job) {
     };
     progress = progressSender(job.id);
     const freeSlot = () => { if (slots.delete(job.id)) pump(); };
-    const store = storeToken ? { id: cloud.id, where: cloud.where, throttledBps: cloud.throttledBps, api: cloud.api, token: storeToken } : null;
+    // ключ облака — заново перед каждым действием (см. runJob): вход Google живёт час
+    const getToken = async () => {
+      const t = await cloud.auth.getToken();
+      if (!t) throw new Error(`Вход в ${cloud.who} устарел — войдите заново (кнопка «Облако» вверху)`);
+      return t;
+    };
+    const store = storeToken ? { id: cloud.id, where: cloud.where, throttledBps: cloud.throttledBps, api: cloud.api, getToken } : null;
     const run = runJob(job, { getOptions, token, store, mode: job.mode, makeDiskRoom: () => makeDiskRoom(cloud), lightTurn,
       listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);

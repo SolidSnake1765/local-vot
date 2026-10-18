@@ -66,7 +66,8 @@ export async function login(ui, signal) {
       })}`);
     });
     const tok = await postForm({ client_id: id, client_secret: secret, code, code_verifier: verifier,
-      grant_type: "authorization_code", redirect_uri: redirect }, signal);
+      grant_type: "authorization_code", redirect_uri: redirect }, signal)
+      .catch((e) => { throw signal?.aborted ? new Error("Вход отменён") : e; }); // «Отмена» в последний момент — тихо
     if (!tok.ok) throw new Error(`Google не выдал доступ: ${tok.data.error_description ?? tok.data.error ?? "нет ответа"}`);
     // на странице Google галочку доступа к Диску можно снять — тогда загружать некуда
     if (!String(tok.data.scope ?? "").split(" ").includes(SCOPE)) {
@@ -75,6 +76,7 @@ export async function login(ui, signal) {
     store.save({ ...tok.data, obtained_at: Date.now() });
   } finally {
     server.close();
+    server.closeAllConnections(); // браузер держит соединение открытым — не ждём его, порт свободен сразу
   }
 }
 
