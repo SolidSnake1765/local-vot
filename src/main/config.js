@@ -23,7 +23,7 @@ export function getCredentials() {
 export const DEFAULT_SETTINGS = {
   outputDir: "",            // пусто — рядом с исходным видео
   saveVideo: true,          // видео с дорожкой перевода
-  videoFormat: "source",    // source — в формате исходника, если он позволяет (иначе .mkv); mkv — всегда .mkv
+  videoFormat: "source",    // source — в формате исходника, если он позволяет (иначе .mkv); mp4 — всегда .mp4; mkv — всегда .mkv
   embedSubs: true,          // вшить русские субтитры в видео
   saveAudio: false,         // звуковая дорожка отдельно: оригинал + перевод, как в видео (.m4a)
   saveVoice: false,         // только голос перевода, как его отдал Яндекс (.mp3)

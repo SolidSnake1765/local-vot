@@ -800,9 +800,11 @@ function syncDependent() {
   const saveVideo = document.querySelector('[data-setting="saveVideo"]').checked;
   document.querySelector('[data-setting="embedSubs"]').disabled = !saveVideo;
   $("videoFormat").disabled = !saveVideo;
-  $("videoFormatNote").textContent = $("videoFormat").value === "mkv"
-    ? "MKV принимает любое видео, звук и субтитры."
-    : "MP4 останется MP4, AVI — AVI и т. д. Если формат не справится (например, FLV), сохраним в MKV и напишем почему. В AVI, WMV, TS, MPG, OGV субтитры не встраиваются — лягут файлом рядом.";
+  $("videoFormatNote").textContent = {
+    mkv: "MKV принимает любое видео, звук и субтитры.",
+    mp4: "Картинка не пережимается. Звук оригинала, который MP4 не принимает (DTS, PCM и т. п.), пережмётся в AAC. "
+      + "Если MP4 не примет саму картинку (редкие кодеки), сохраним в MKV и напишем почему.",
+  }[$("videoFormat").value] ?? "MP4 останется MP4, AVI — AVI и т. д. Если формат не справится (например, FLV), сохраним в MKV и напишем почему. В AVI, WMV, TS, MPG, OGV субтитры не встраиваются — лягут файлом рядом.";
   $("saveNone").hidden = ["saveVideo", "saveAudio", "saveVoice", "saveSubs"]
     .some((k) => document.querySelector(`[data-setting="${k}"]`).checked);
 

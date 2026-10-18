@@ -63,7 +63,7 @@ add a video, press "Start", get the translated video.
   **on all CPU cores**: the track of a two-hour video takes tens of seconds, not minutes.
 - **Windows notifications** — when a video or the whole queue is done (if the window is minimized); can be turned off.
 - **16 formats**: MP4, MKV, MOV, AVI, WebM, M4V, WMV, FLV, TS, MPG, MPEG, M2TS, MTS, 3GP, VOB, OGV.
-  The result is saved in the same format as the source (or always MKV — your choice).
+  The result is saved in the same format as the source, or always MP4 / always MKV — your choice; the picture is never re-encoded.
 - **No quality loss** — the picture is copied as is, the audio is saved at no lower quality than the original.
 - **Per-video sound settings** — original and translation volume with a preview right in the app;
   changed it — re-save in seconds, without translating again. The translation volume adapts to the original

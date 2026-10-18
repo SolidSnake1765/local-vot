@@ -217,14 +217,17 @@ const CONTAINERS = {
 };
 
 /**
- * План сборки видео: в формате исходника (если можно) или в MKV.
+ * План сборки видео: в формате исходника (если можно), всегда MP4 или всегда MKV (настройка «Формат»).
+ * Картинка копируется как есть в любом случае; MP4 — если звук оригинала MP4 не принимает (DTS, PCM, Vorbis…),
+ * он пережимается в AAC; картинку, которую MP4 не принимает, сборка не возьмёт — тогда повтор в MKV (pipeline).
+ * @param target — "source" | "mp4" | "mkv"
  * @returns { ext, format, voice, origCodec, subs, reason? } — reason: почему пришлось взять MKV
  */
-export function videoPlan(sourceExt, audioCodec, preferSource = true) {
-  const ext = sourceExt.toLowerCase();
-  const c = preferSource ? CONTAINERS[ext] : null;
+export function videoPlan(sourceExt, audioCodec, target = "source") {
+  const ext = target === "mp4" ? "mp4" : sourceExt.toLowerCase();
+  const c = target === "mkv" ? null : CONTAINERS[ext];
   const mkv = (reason) => ({ ext: "mkv", ...CONTAINERS.mkv, origCodec: "copy", reason });
-  if (!c) return mkv(preferSource ? `формат ${ext.toUpperCase()} не поддерживается для сохранения` : "");
+  if (!c) return mkv(target === "source" ? `формат ${ext.toUpperCase()} не поддерживается для сохранения` : "");
   if (c.reason) return mkv(c.reason);
   const origCodec = !c.keep || c.keep.includes(audioCodec) ? "copy" : c.voice;
   return { ext, ...c, origCodec, reason: "" };

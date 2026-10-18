@@ -175,9 +175,9 @@ export async function runJob(job, { getOptions, token, mode = "translate", makeD
         pending = null;
       }
       if (options.saveVideo) {
-        // формат исходника (если можно), иначе MKV; не собралось в формате исходника — пробуем MKV
+        // формат исходника (если можно, иначе MKV) или выбранный MP4/MKV; не собралось — пробуем MKV
         const srcExt = path.extname(file).slice(1).toLowerCase();
-        let plan = videoPlan(srcExt, src.audioCodec, options.videoFormat !== "mkv");
+        let plan = videoPlan(srcExt, src.audioCodec, options.videoFormat ?? "source");
         log.info(`видео #${job.no}`, `сохранение видео: .${plan.ext}, перевод ${plan.voice} ${audioKbps(plan.voice, src.audio)} кбит/с, `
           + `оригинал ${plan.origCodec === "copy" ? "без пережатия" : plan.origCodec}${plan.reason ? `, MKV: ${plan.reason}` : ""}`
           + `${premixed ? ", звук из готовой .m4a" : ""}${options.fastAudio ? ", быстрое кодирование" : ""}`);
@@ -204,7 +204,7 @@ export async function runJob(job, { getOptions, token, mode = "translate", makeD
           if (signal?.aborted || plan.ext === "mkv" || diskFullError(e)) throw e;
           log.warn(`видео #${job.no}`, `.${plan.ext} не собрался — повтор в MKV`, e);
           await rm(pending, { force: true });
-          plan = mkvPlan(`${srcExt.toUpperCase()} не принял картинку или звук этого видео`);
+          plan = mkvPlan(`${plan.ext.toUpperCase()} не принял картинку или звук этого видео`);
           built = await build(plan);
         }
         saveNote = describeMix(options, built.autoGainDb);

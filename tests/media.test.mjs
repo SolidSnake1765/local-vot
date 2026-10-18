@@ -142,4 +142,39 @@ test("облегчённая копия (звук сжимается отдел�
   assertAt(await sounds(origOut), inVideo.map((t) => t - offset), 0.006, "копия звука");
 });
 
+test("формат «Всегда MP4»: картинка копируется как есть, звук, которого MP4 не берёт, — в AAC, субтитры встроены", { skip }, async () => {
+  assert.deepEqual([media.videoPlan("mkv", "aac", "mp4").ext, media.videoPlan("mkv", "aac", "mp4").origCodec], ["mp4", "copy"]);
+  assert.equal(media.videoPlan("avi", "pcm_s16le", "mp4").origCodec, "aac", "PCM в MP4 не кладётся — пережимаем");
+  assert.equal(media.videoPlan("mp4", "aac", "mkv").ext, "mkv");
+  assert.equal(media.videoPlan("avi", "mp3", "source").ext, "avi");
+  // исходник — MKV со звуком PCM (MP4 его не принимает)
+  const video = path.join(dir, "src-pcm.mkv");
+  await ff(["-f", "lavfi", "-t", String(DURATION), "-i", "color=c=gray:s=320x180:r=10", "-i", orig,
+    "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le", video]);
+  const subs = path.join(dir, "subs.srt");
+  writeFileSync(subs, "1\n00:00:01,000 --> 00:00:02,000\nПривет\n");
+  const info = await media.probe(video);
+  const plan = media.videoPlan("mkv", info.audioCodec, "mp4");
+  const out = path.join(dir, "out [RU].mp4");
+  await media.mux(video, voice, subs, out, opts({ voiceAnalysis: await media.analyzeVoice(voice), origInfo: info.audio }),
+    DURATION, null, null, plan);
+  const streams = (await ff(["-i", out, "-map", "0", "-c", "copy", "-f", "null", "-"])).match(/Stream #0:\d+\[0x[^\n]*/g).join("\n"); // только входной файл
+  assert.match(streams, /Video: h264/);
+  assert.equal(streams.match(/Audio: aac/g)?.length, 2, `две дорожки AAC:\n${streams}`);
+  assert.match(streams, /Subtitle: mov_text/);
+  // картинка побитно та же: размер и контрольная сумма каждого видеопакета исходника и итога совпадают
+  // (метки времени у MKV и MP4 в разных единицах — их не сравниваем)
+  const packets = (f) => new Promise((resolve, reject) => {
+    const p = spawn(FFMPEG.pathname.replace(/^\/(\w:)/, "$1").replaceAll("%20", " "),
+      ["-v", "error", "-i", f, "-map", "0:v", "-c", "copy", "-f", "framecrc", "-"], { windowsHide: true });
+    let o = "";
+    p.stdout.on("data", (d) => { o += d; });
+    p.on("close", (code) => (code ? reject(new Error(`framecrc ${f}`))
+      : resolve(o.split("\n").filter((l) => /^0,/.test(l)).map((l) => l.split(",").slice(4, 6).join(",").trim()))));
+  });
+  const [a, b] = [await packets(video), await packets(out)];
+  assert.ok(a.length > 100, `кадров ${a.length}`);
+  assert.deepEqual(b, a, "картинка не пережата");
+});
+
 test.after(() => rmSync(dir, { recursive: true, force: true }));
