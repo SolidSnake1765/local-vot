@@ -172,7 +172,7 @@ test("Google Диск: копия туда и ссылка оттуда; без 
     unpublish: async (tok, ref) => { google.push(["unpublish", tok, ref]); },
     freeSpace: async () => 1e12,
   };
-  const t = await run({ lively: true, lang: "en" }, { token: null, store: { kind: "google", title: "Google Диск", api, token: "g" } });
+  const t = await run({ lively: true, lang: "en" }, { token: null, store: { id: "google", where: "на Google Диске", api, token: "g" } });
   assert.equal(t.ok, true, t.error);
   assert.equal(calls.upload, 0, "Яндекс Диск не трогали");
   assert.equal(t.job.diskPath, "gdrive:F");
@@ -184,7 +184,7 @@ test("Google Диск: копия туда и ссылка оттуда; без 
   assert.match(t.card.findLast((p) => p.step === "translate" && p.state === "done").detail, /войдите в Яндекс/);
   assert.match(t.card.find((p) => p.step === "upload" && p.state === "active").detail, /Google Диске/);
   // со входом в Яндекс — живые голоса и с Google Диском
-  const t2 = await run({ lively: true, lang: "en" }, { token: "y", store: { kind: "google", title: "Google Диск", api, token: "g" } });
+  const t2 = await run({ lively: true, lang: "en" }, { token: "y", store: { id: "google", where: "на Google Диске", api, token: "g" } });
   assert.equal(t2.ok, true, t2.error);
   assert.deepEqual(calls.translate.at(-1), { lively: true, lang: "en" });
 });

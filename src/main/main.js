@@ -3,11 +3,8 @@ import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import * as auth from "./auth.js";
-import * as gauth from "./gauth.js";
+import { cloudById, cloudOf, CLOUDS, livelyCloud, publicClouds } from "./clouds.js";
 import { getCredentials, getGoogleCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
-import * as disk from "./yadisk.js";
-import * as gdrive from "./gdrive.js";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { readdir, rename, rm, stat } from "node:fs/promises";
 import { describeMix, origAudio, origAudioPath, profilePath, reserveDiskTurn, runJob, STEPS, translationCacheDir, wakeDiskTurn } from "./pipeline.js";
@@ -43,14 +40,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts",
   "mpg", "mpeg", "m2ts", "mts", "3gp", "vob", "ogv"];
 
-// Куда загружается облегчённая копия для переводчика (настройка «Облако»). Копия видео помнит свой Диск
-// по пути (job.diskPath): у Google Диска он начинается с «gdrive:».
-const STORES = {
-  yandex: { kind: "yandex", title: "Яндекс Диск", api: disk, getToken: () => auth.getToken() },
-  google: { kind: "google", title: "Google Диск", api: gdrive, getToken: () => gauth.getToken() },
-};
-const storeOf = (diskPath) => (String(diskPath).startsWith(gdrive.PREFIX) ? STORES.google : STORES.yandex);
-const currentStore = () => (loadSettings().storage === "google" ? STORES.google : STORES.yandex);
+// Куда загружается облегчённая копия для переводчика (кнопка «Облако»): список облаков — clouds.js.
+// Копия видео помнит своё облако по пути (job.diskPath, см. cloudOf).
+const currentCloud = () => cloudById(loadSettings().storage);
 
 let win = null;
 const send = (channel, payload) => {
@@ -159,19 +151,20 @@ async function runOne(job) {
   log.info(scope, job.mode === "remux" ? "пересборка из готового перевода"
     : `перевод: ${job.lively ? "живые" : "обычные"} голоса, язык ${job.lang}${job.replace ? ", заменить прежнюю версию" : ""}`);
   try {
-    // вход в Яндекс — для Яндекс Диска и живых голосов; с Google Диском он по желанию (только ради голосов)
-    const store = currentStore();
-    const token = store === STORES.yandex ? await auth.getToken() : await auth.getToken().catch(() => null);
+    // вход в выбранное облако — чтобы загрузить копию (пересборке облако не нужно); вход в Яндекс — ещё и ради
+    // живых голосов: при другом облаке он по желанию
+    const cloud = currentCloud();
     let storeToken = null;
     if (job.mode !== "remux") {
-      storeToken = store === STORES.yandex ? token : await gauth.getToken();
+      storeToken = await cloud.auth.getToken();
       if (!storeToken) {
-        throw new Error(store === STORES.yandex ? "Войдите в Яндекс, чтобы переводить видео"
-          : "Войдите в Google (кнопка вверху), чтобы загружать копии на Google Диск, или выберите Яндекс Диск в настройках «Облако»");
+        throw new Error(`Войдите в ${cloud.who} (кнопка «Облако» вверху), чтобы переводить через ${cloud.title}, или выберите там другое облако`);
       }
-      // копия лежит на другом Диске (настройку «Облако» переключили) — убираем её, загрузится заново
-      if (job.diskPath && storeOf(job.diskPath) !== store) await removeDiskCopy(job);
+      // копия лежит в другом облаке (выбор облака поменяли) — убираем её, загрузится заново
+      if (job.diskPath && cloudOf(job.diskPath) !== cloud) await removeDiskCopy(job);
     }
+    const voice = livelyCloud();
+    const token = voice === cloud && storeToken ? storeToken : await voice.auth.getToken().catch(() => null);
     // настройки читаются в момент сохранения: общие + что сохранять и звук этого видео (если их меняли в карточке)
     let soundUsed = null;
     const getOptions = () => {
@@ -181,8 +174,8 @@ async function runOne(job) {
     };
     progress = progressSender(job.id);
     const freeSlot = () => { if (slots.delete(job.id)) pump(); };
-    const storage = storeToken ? { kind: store.kind, title: store.title, api: store.api, token: storeToken } : null;
-    const run = runJob(job, { getOptions, token, store: storage, mode: job.mode, makeDiskRoom: () => makeDiskRoom(store), lightTurn,
+    const store = storeToken ? { id: cloud.id, where: cloud.where, throttledBps: cloud.throttledBps, api: cloud.api, token: storeToken } : null;
+    const run = runJob(job, { getOptions, token, store, mode: job.mode, makeDiskRoom: () => makeDiskRoom(cloud), lightTurn,
       listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
       // последнее состояние и подпись каждого шага — чтобы восстановленная карточка выглядела так же
@@ -289,14 +282,14 @@ ipcMain.handle("app:cancelShutdown", () => {
 });
 
 /**
- * На Диске (store — Яндекс или Google) не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
+ * В облаке cloud не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
  * (готовые, с ошибкой, отменённые): они нужны только для «Перевести заново» без повторной загрузки.
  * Если такое видео переведут заново, копия просто загрузится ещё раз. Возвращает, сколько копий убрано.
  */
-async function makeDiskRoom(store) {
+async function makeDiskRoom(cloud) {
   let removed = 0;
   for (const job of jobs.values()) {
-    if (!job.diskPath || storeOf(job.diskPath) !== store || ["queued", "running"].includes(job.state)) continue;
+    if (!job.diskPath || cloudOf(job.diskPath) !== cloud || ["queued", "running"].includes(job.state)) continue;
     // мимо Корзины: в Корзине копия продолжала бы занимать место. Это временная копия программы
     // (чёрный кадр + звук), не файл пользователя
     await removeDiskCopy(job, { permanently: true });
@@ -678,12 +671,12 @@ async function removeDiskCopy(job, { permanently = null } = {}) {
   if (!job.diskPath) return;
   const diskPath = job.diskPath;
   job.diskPath = null;
-  const store = storeOf(diskPath);
-  const token = await store.getToken().catch(() => null);
+  const cloud = cloudOf(diskPath);
+  const token = await cloud.auth.getToken().catch(() => null);
   if (!token) return;
   const { deletePermanently } = loadSettings();
-  await store.api.unpublish(token, diskPath).catch(() => {});
-  await store.api.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
+  await cloud.api.unpublish(token, diskPath).catch(() => {});
+  await cloud.api.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
 }
 
 /**
@@ -719,113 +712,85 @@ async function shutdown() {
   await rm(workRoot(), { recursive: true, force: true, maxRetries: 3 }).catch((e) => log.warn("выход", "временная папка убрана не вся", e));
 }
 
-/** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи); only — один Диск. */
+/** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи); only — одно облако. */
 async function purgeLeftovers(only = null) {
   const { deletePermanently } = loadSettings();
   const inUse = new Set([...jobs.values()].map((j) => j.diskPath).filter(Boolean));
-  for (const store of Object.values(STORES)) {
-    if (only && store !== only) continue;
-    const token = await store.getToken().catch(() => null);
+  for (const cloud of CLOUDS) {
+    if (only && cloud !== only) continue;
+    const token = await cloud.auth.getToken().catch(() => null);
     if (!token) continue;
     let removed = 0;
-    for (const p of await store.api.listAppFolder(token)) {
+    for (const p of await cloud.api.listAppFolder(token)) {
       if (inUse.has(p)) continue;
-      await store.api.remove(token, p, { permanently: deletePermanently })
+      await cloud.api.remove(token, p, { permanently: deletePermanently })
         .then(() => { removed++; })
-        .catch((e) => log.warn(store.title, "не удалось убрать старую копию", e));
+        .catch((e) => log.warn(cloud.title, "не удалось убрать старую копию", e));
     }
-    if (removed) log.info(store.title, `убрано копий с прошлого запуска: ${removed}`);
+    if (removed) log.info(cloud.title, `убрано копий с прошлого запуска: ${removed}`);
   }
 }
 
-// ---------- IPC ----------
-async function authStatus() {
-  const token = await auth.getToken().catch(() => null);
+// ---------- облака: вход и выход (одинаково для всех, см. clouds.js) ----------
+/** Вход в облако: { loggedIn, name, usedBytes, totalBytes } (offline — вход есть, но облако не ответило). */
+async function cloudStatus(cloud) {
+  const token = await cloud.auth.getToken().catch(() => null);
   if (!token) return { loggedIn: false };
   try {
-    const account = await auth.getAccount(token);
+    const account = await cloud.auth.getAccount(token);
     return account ? { loggedIn: true, ...account } : { loggedIn: false };
   } catch (e) {
-    return { loggedIn: true, name: "Яндекс", offline: e.message };
+    return { loggedIn: true, name: cloud.who, offline: e.message };
   }
 }
 
-let loginController = null;
-ipcMain.handle("auth:status", authStatus);
-ipcMain.handle("auth:login", async () => {
-  loginController?.abort();
-  loginController = new AbortController();
-  try {
-    await auth.login((code) => {
-      send("auth:code", code);
+let login = null; // { cloud, controller, codeUrl } — идущий вход (один на всех)
+ipcMain.handle("cloud:list", () => publicClouds());
+ipcMain.handle("cloud:status", async () =>
+  Object.fromEntries(await Promise.all(CLOUDS.map(async (c) => [c.id, await cloudStatus(c)]))));
+ipcMain.handle("cloud:login", async (_e, id) => {
+  const cloud = cloudById(id);
+  login?.controller.abort();
+  const current = { cloud, controller: new AbortController(), codeUrl: "" };
+  login = current;
+  // что показать человеку — по способу входа облака: код на странице сервиса или страница в браузере
+  const ui = {
+    showCode: (code) => {
+      current.codeUrl = code.url;
+      send("cloud:code", { id: cloud.id, ...code });
       shell.openExternal(code.url);
-    }, loginController.signal);
-    purgeLeftovers(STORES.yandex);
-    log.info("вход", "вход в Яндекс выполнен");
-    return { ok: true, status: await authStatus() };
+    },
+    openUrl: (url) => shell.openExternal(url),
+  };
+  try {
+    await cloud.auth.login(ui, current.controller.signal);
+    purgeLeftovers(cloud);
+    log.info("вход", `вход в ${cloud.who} выполнен`);
+    return { ok: true };
   } catch (e) {
-    if (!/отмен/i.test(e.message)) log.warn("вход", "вход в Яндекс не удался", e);
+    if (!/отмен/i.test(e.message)) log.warn("вход", `вход в ${cloud.who} не удался`, e);
     return { ok: false, error: e.message };
   } finally {
-    loginController = null;
+    if (login === current) login = null;
   }
 });
-ipcMain.handle("auth:cancel", () => loginController?.abort());
-ipcMain.handle("auth:logout", async () => {
-  log.info("вход", "выход из Яндекса");
-  // Копии видео лежат на Диске этого аккаунта: после выхода их уже не убрать, а «Перевести заново» искало бы
-  // их на Диске нового аккаунта (и падало с «копия пропала»). Убираем сейчас, пока вход действует; идущие
+ipcMain.handle("cloud:cancel", () => login?.controller.abort());
+ipcMain.handle("cloud:logout", async (_e, id) => {
+  const cloud = cloudById(id);
+  log.info("вход", `выход из ${cloud.who}`);
+  // Копии видео лежат в облаке этого аккаунта: после выхода их уже не убрать, а «Перевести заново» искало бы
+  // их в облаке нового аккаунта (и падало с «копия пропала»). Убираем сейчас, пока вход действует; идущие
   // переводы окно перед этим отменило — дожидаемся, пока они закроют ссылки
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   if (running.size) await Promise.race([Promise.all(running.values()), wait(20_000)]);
-  const own = [...jobs.values()].filter((j) => j.diskPath && storeOf(j.diskPath) === STORES.yandex);
+  const own = [...jobs.values()].filter((j) => j.diskPath && cloudOf(j.diskPath) === cloud);
   await Promise.race([Promise.all(own.map((j) => removeDiskCopy(j))), wait(20_000)]);
-  auth.logout();
+  await cloud.auth.logout();
 });
+// страница для кода входа — только та, что программа сама показала (адрес приходит из интерфейса)
+ipcMain.handle("cloud:openCodePage", () => { if (login?.codeUrl) shell.openExternal(login.codeUrl); });
 
-// ---------- вход в Google (для Google Диска) ----------
-async function googleStatus() {
-  const token = await gauth.getToken().catch(() => null);
-  if (!token) return { loggedIn: false };
-  try {
-    const account = await gauth.getAccount(token);
-    return account ? { loggedIn: true, ...account } : { loggedIn: false };
-  } catch (e) {
-    return { loggedIn: true, name: "Google", offline: e.message };
-  }
-}
-let googleLoginController = null;
-ipcMain.handle("gauth:status", googleStatus);
-ipcMain.handle("gauth:login", async () => {
-  googleLoginController?.abort();
-  googleLoginController = new AbortController();
-  try {
-    await gauth.login((url) => shell.openExternal(url), googleLoginController.signal);
-    purgeLeftovers(STORES.google);
-    log.info("вход", "вход в Google выполнен");
-    return { ok: true, status: await googleStatus() };
-  } catch (e) {
-    if (!/отмен/i.test(e.message)) log.warn("вход", "вход в Google не удался", e);
-    return { ok: false, error: e.message };
-  } finally {
-    googleLoginController = null;
-  }
-});
-ipcMain.handle("gauth:cancel", () => googleLoginController?.abort());
-ipcMain.handle("gauth:logout", async () => {
-  log.info("вход", "выход из Google");
-  // как с Яндексом: копии на Google Диске этого аккаунта убираем, пока вход действует
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  if (running.size) await Promise.race([Promise.all(running.values()), wait(20_000)]);
-  const own = [...jobs.values()].filter((j) => j.diskPath && storeOf(j.diskPath) === STORES.google);
-  await Promise.race([Promise.all(own.map((j) => removeDiskCopy(j))), wait(20_000)]);
-  await gauth.logout();
-});
-ipcMain.handle("auth:openPage", (_e, url) => {
-  // открываем только страницы Яндекса — адрес приходит из интерфейса
-  if (/^https:\/\/([a-z0-9-]+\.)*(ya\.ru|yandex\.ru)\//.test(url)) shell.openExternal(url);
-});
-
+// ---------- IPC ----------
 // страница программы на GitHub — из package.json (repository.url), без «git+» и «.git»
 const REPO_URL = (() => {
   try {

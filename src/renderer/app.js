@@ -9,10 +9,8 @@ const STATE_LABEL = { idle: "Ожидает запуска", queued: "В оче�
 let STEPS = [];
 let LANGS = [];
 let LIVELY_LANG = "en";
-let loggedIn = false; // можно переводить: есть вход туда, куда загружаются копии (настройка «Облако»)
-let yandexIn = false;
-let googleIn = false;
-let storage = "yandex";
+let loggedIn = false; // можно переводить: есть вход в облако, куда загружаются копии (кнопка «Облако»)
+let storage = "yandex"; // выбранное облако (id из clouds.js)
 const langName = (code) => LANGS.find((l) => l.code === code)?.name ?? code;
 
 const fmtTime = (sec) => {
@@ -35,83 +33,135 @@ const cards = new Map(); // id задания → элементы карточ�
 // задание стартует сразу после добавления, и первые события могут прийти раньше, чем появится карточка
 const early = new Map(); // id → события, ждущие своей карточки
 
-// ---------- вход в Яндекс и Google ----------
-/** «Яндекс: имя · Диск 0.6 из 10 ГБ ▬» — в строку шапки; withDisk — показывать место на Диске. */
-function renderAccountLine(text, who, s, withDisk) {
-  text.textContent = "";
-  text.append(`${who}: `);
+// ---------- облака: выбор, вход и выход ----------
+// Список облаков (название, описание, способ входа) приходит из главного процесса (clouds.js): новое облако
+// появляется здесь само — карточкой в окне «Облако», в шапке и во входе.
+let CLOUDS = []; // { id, title, who, login: "code" | "browser", lively, points }
+let accounts = {}; // id облака → { loggedIn, name, usedBytes, totalBytes }
+const cloudInfo = (id) => CLOUDS.find((c) => c.id === id) ?? CLOUDS[0];
+const voiceCloud = () => CLOUDS.find((c) => c.lively); // чей вход даёт живые голоса (Яндекс)
+const signedIn = (id) => Boolean(accounts[id]?.loggedIn);
+
+/** «имя · 0.6 из 10 ГБ ▬» в элемент el (место — если облако его сообщило). */
+function renderAccount(el, acc) {
+  el.textContent = "";
   const b = document.createElement("b");
-  b.textContent = s.name;
-  text.append(b);
-  if (!withDisk || !s.totalBytes) return;
-  text.append(` · Диск ${(s.usedBytes / 1024 ** 3).toFixed(1)} из ${(s.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
+  b.textContent = acc.name;
+  el.append(b);
+  if (!acc.totalBytes) return;
+  el.append(` · ${(acc.usedBytes / 1024 ** 3).toFixed(1)} из ${(acc.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
   const meter = document.createElement("span");
   meter.className = "disk-meter";
-  meter.title = `Занято ${Math.round((s.usedBytes / s.totalBytes) * 100)}%`;
+  meter.title = `Занято ${Math.round((acc.usedBytes / acc.totalBytes) * 100)}%`;
   const fill = document.createElement("i");
-  fill.style.width = `${Math.min(100, (s.usedBytes / s.totalBytes) * 100)}%`;
+  fill.style.width = `${Math.min(100, (acc.usedBytes / acc.totalBytes) * 100)}%`;
   meter.append(fill);
-  text.append(meter);
+  el.append(meter);
 }
 
 async function refreshAccount() {
-  const [s, g] = await Promise.all([api.authStatus(), api.googleStatus()]);
-  yandexIn = s.loggedIn;
-  googleIn = g.loggedIn;
-  const google = storage === "google";
-  loggedIn = google ? googleIn : yandexIn;
-  // Яндекс: с Яндекс Диском — обязателен (и показываем место на Диске), с Google Диском — ради живых голосов
-  const text = $("accountText");
-  const btn = $("accountBtn");
-  btn.hidden = false;
-  if (s.loggedIn) {
-    renderAccountLine(text, "Яндекс", s, !google);
-    btn.textContent = "Выйти";
-  } else {
-    text.textContent = google ? "Яндекс — для живых голосов" : "Для перевода нужен вход в Яндекс";
-    btn.textContent = "Войти через Яндекс";
+  accounts = await api.cloudStatus();
+  renderCloud();
+}
+
+/** Карточки облаков в окне «Облако» — один раз, по списку облаков. */
+function buildCloudCards() {
+  const voice = voiceCloud();
+  for (const c of CLOUDS) {
+    const node = $("cloudOptTpl").content.firstElementChild.cloneNode(true);
+    node.dataset.cloud = c.id;
+    node.querySelector("input").value = c.id;
+    node.querySelector(".cloud-opt-title").textContent = c.title;
+    const voiceLine = c.lively ? "Этот же вход даёт живые голоса."
+      : `Живые голоса — только если войти и в ${voice.who} (в карточке «${voice.title}»). Без этого — обычные голоса.`;
+    for (const text of [...c.points, voiceLine]) {
+      const li = document.createElement("li");
+      li.textContent = text;
+      node.querySelector("ul").append(li);
+    }
+    const btn = node.querySelector('[data-acc="btn"]');
+    btn.onclick = () => (signedIn(c.id) ? logoutFrom(btn, c) : startLogin(c));
+    node.addEventListener("click", (e) => { if (!e.target.closest('[data-acc="btn"]')) chooseCloud(c.id); });
+    $("cloudOptions").append(node);
   }
-  // Google — когда выбран Google Диск или вход уже есть (чтобы можно было выйти)
-  $("gAccount").hidden = !google && !g.loggedIn;
-  if (g.loggedIn) {
-    renderAccountLine($("gAccountText"), "Google", g, google);
-    $("gAccountBtn").textContent = "Выйти";
+}
+
+/** Кнопка «Облако» и напоминание о живых голосах в шапке, карточки окна — по выбору и входам. */
+function renderCloud() {
+  const cloud = cloudInfo(storage);
+  const voice = voiceCloud();
+  loggedIn = signedIn(cloud.id);
+  // кнопка — вход во все облака, поэтому крупно «Облако»; ниже — какое выбрано и чей вход (если он есть)
+  $("cloudBtn").classList.toggle("need", !loggedIn);
+  if (loggedIn) {
+    const line = document.createElement("span");
+    renderAccount(line, accounts[cloud.id]);
+    $("cloudSub").replaceChildren(`${cloud.title} · `, line);
   } else {
-    $("gAccountText").textContent = "Для Google Диска нужен вход в Google";
-    $("gAccountBtn").textContent = "Войти через Google";
+    $("cloudSub").textContent = "Нужен вход в облако";
+  }
+  for (const node of document.querySelectorAll(".cloud-opt")) {
+    const c = cloudInfo(node.dataset.cloud);
+    node.classList.toggle("selected", c.id === cloud.id);
+    node.querySelector("input").checked = c.id === cloud.id;
+    const text = node.querySelector('[data-acc="text"]');
+    const btn = node.querySelector('[data-acc="btn"]');
+    if (signedIn(c.id)) {
+      text.textContent = "Вход: ";
+      const line = document.createElement("span");
+      renderAccount(line, accounts[c.id]);
+      text.append(line);
+    } else {
+      text.textContent = c.lively && c.id !== cloud.id ? "Вход не выполнен — нужен только для живых голосов" : "Вход не выполнен";
+    }
+    btn.textContent = signedIn(c.id) ? "Выйти" : `Войти через ${c.who}`;
+    btn.className = `btn btn-small${signedIn(c.id) ? " btn-ghost" : ""}`;
+  }
+  // живые голоса — только со входом в Яндекс, при любом облаке: метка в шапке (пока нет входа) и подробнее — в окне
+  const noVoice = Boolean(voice) && !signedIn(voice.id);
+  $("voiceTag").hidden = !noVoice;
+  if (voice) {
+    // длинная надпись — в широком окне, короткая — в узком (стили)
+    $("voiceTag").replaceChildren(Object.assign(document.createElement("span"), { className: "vt-long",
+      textContent: `Живые голоса не работают — нет входа в ${voice.who}` }),
+    Object.assign(document.createElement("span"), { className: "vt-short", textContent: "Без живых голосов" }));
+  }
+  $("cloudVoiceNote").hidden = !noVoice || cloud.id === voice.id;
+  if (voice) {
+    $("cloudVoiceNote").textContent = `Выбрано облако «${cloud.title}», а вход в ${voice.who} не выполнен — видео будут переводиться `
+      + `обычными голосами. Для живых голосов войдите в ${voice.who} в карточке «${voice.title}» — выбранное облако не изменится.`;
   }
   syncDependent();
 }
 
-/** Войти туда, куда загружаются копии (настройка «Облако»). */
-const startNeededLogin = () => (storage === "google" ? startGoogleLogin() : startLogin());
+const openCloud = () => { $("cloudModal").hidden = false; };
+const closeCloud = () => { $("cloudModal").hidden = true; };
+$("cloudBtn").onclick = openCloud;
+$("voiceTag").onclick = openCloud;
+$("cloudClose").onclick = closeCloud;
+// щелчок мимо окна и Esc — закрыть (если поверх не открыто окно входа или вопрос)
+$("cloudModal").addEventListener("click", (e) => { if (e.target === $("cloudModal")) closeCloud(); });
+document.addEventListener("keydown", (e) => {
+  const above = ["loginModal", "askModal"].some((id) => !$(id).hidden);
+  if (e.key === "Escape" && !$("cloudModal").hidden && !above) closeCloud();
+});
 
-async function startGoogleLogin() {
-  $("gLoginModal").hidden = false;
-  $("gLoginWait").hidden = false;
-  $("gLoginError").hidden = true;
-  const r = await api.googleLogin();
-  if (r.ok) {
-    $("gLoginModal").hidden = true;
-    await refreshAccount();
-  } else if (!/отмен/i.test(r.error)) {
-    $("gLoginWait").hidden = true;
-    $("gLoginError").textContent = r.error;
-    $("gLoginError").hidden = false;
-  } else {
-    $("gLoginModal").hidden = true;
-  }
+/** Выбрать облако: копии новых видео пойдут туда. */
+function chooseCloud(id) {
+  if (id === storage) return;
+  storage = id;
+  api.setSettings({ storage: id });
+  renderCloud();
 }
-$("gLoginCancel").onclick = () => { api.cancelGoogleLogin(); $("gLoginModal").hidden = true; };
 
 /** Выход: если идут переводы — спросить (они будут отменены), потом выйти и обновить шапку. */
-async function logoutFrom(btn, title, logout) {
+async function logoutFrom(btn, cloud) {
   const busy = [...cards.values()].filter((c) => c.state === "running" || c.state === "queued").length;
   if (busy) {
     const ok = await askUser({
-      title,
+      title: `Выйти из аккаунта ${cloud.who}?`,
       text: `Переводятся или ждут очереди: ${busy}. Они будут отменены — потом их можно запустить снова `
-        + "уже с другим входом. Копии видео на Диске этого аккаунта уберутся.",
+        + `уже с другим входом. Копии видео в облаке «${cloud.title}» этого аккаунта уберутся.`,
       buttons: [{ label: "Выйти", value: true, kind: "danger" }, { label: "Не выходить", value: null, kind: "ghost" }],
     });
     if (!ok) return;
@@ -120,25 +170,37 @@ async function logoutFrom(btn, title, logout) {
   btn.disabled = true;
   btn.textContent = "Выходим…";
   try {
-    await logout();
+    await api.cloudLogout(cloud.id);
   } finally {
     btn.disabled = false;
   }
   await refreshAccount();
 }
-$("gAccountBtn").onclick = () => (googleIn ? logoutFrom($("gAccountBtn"), "Выйти из Google?", api.googleLogout) : startGoogleLogin());
 
-async function startLogin() {
+// ---------- вход: одно окно для всех облаков ----------
+let loginCloud = null; // облако, в которое сейчас входим
+async function startLogin(cloud) {
+  loginCloud = cloud;
+  $("loginTitle").textContent = `Вход в ${cloud.who}`;
+  $("loginWaitText").textContent = cloud.login === "code" ? "Получаем код…"
+    : `В браузере открылась страница ${cloud.who}: войдите и разрешите Local VOT доступ к облаку.`;
+  $("loginWaitText").className = cloud.login === "code" ? "muted" : "";
+  $("loginNote").textContent = cloud.login === "browser"
+    ? "Программа увидит в облаке только файлы, которые создаст сама. Пароль программа не видит."
+    : "Пароль программа не видит.";
   $("loginModal").hidden = false;
   $("loginWait").hidden = false;
   $("loginCode").hidden = true;
   $("loginError").hidden = true;
-  const r = await api.login();
+  const r = await api.cloudLogin(cloud.id);
+  if (loginCloud !== cloud) return; // вход отменили или начали другой
+  loginCloud = null;
   if (r.ok) {
     $("loginModal").hidden = true;
     await refreshAccount();
-  } else if (!/отменён/i.test(r.error)) {
+  } else if (!/отмен/i.test(r.error)) {
     $("loginWait").hidden = true;
+    $("loginCode").hidden = true;
     $("loginError").textContent = r.error;
     $("loginError").hidden = false;
   } else {
@@ -146,23 +208,26 @@ async function startLogin() {
   }
 }
 
-let codeUrl = "";
-api.on("auth:code", ({ userCode, url }) => {
-  codeUrl = url;
+// код входа готов (облака со входом по коду): показать и открыть страницу
+api.on("cloud:code", ({ id, userCode }) => {
+  if (loginCloud?.id !== id) return;
   $("codeText").textContent = userCode;
   $("loginWait").hidden = true;
   $("loginCode").hidden = false;
 });
-$("openCodePage").onclick = () => api.openPage(codeUrl);
+$("openCodePage").onclick = () => api.openCodePage();
 $("copyCode").onclick = () => navigator.clipboard.writeText($("codeText").textContent);
-$("loginCancel").onclick = () => { api.cancelLogin(); $("loginModal").hidden = true; };
-$("accountBtn").onclick = () => (yandexIn ? logoutFrom($("accountBtn"), "Выйти из Яндекса?", api.logout) : startLogin());
+$("loginCancel").onclick = () => {
+  loginCloud = null;
+  api.cancelCloudLogin();
+  $("loginModal").hidden = true;
+};
 
 // ---------- добавление видео ----------
 async function addFiles(paths) {
   if (!paths.length) return;
   if (!loggedIn) {
-    startNeededLogin();
+    openCloud(); // сначала — вход в выбранное облако (или выбор другого)
     return;
   }
   const { added, note, error } = await api.addJobs(paths);
@@ -817,10 +882,6 @@ async function initSettings() {
       const numeric = el.type === "range" || el.dataset.type === "number";
       const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
-      if (key === "storage") {
-        storage = value;
-        refreshAccount().catch(() => {}); // в шапке — нужный вход
-      }
       syncDependent();
       if (SAVE_KEYS.includes(key)) {
         saveDefaults[key] = value;
@@ -852,10 +913,6 @@ function syncDependent() {
   $("saveNone").hidden = ["saveVideo", "saveAudio", "saveVoice", "saveSubs"]
     .some((k) => document.querySelector(`[data-setting="${k}"]`).checked);
 
-  $("storageNote").textContent = storage === "google"
-    ? "Нужен вход в Google. Месячного лимита загрузки нет; программа видит на Google Диске только свои копии. Без входа в Яндекс — только обычные голоса."
-    : "Нужен вход в Яндекс. Бесплатный Яндекс Диск принимает не больше 10 ГБ загрузок за 30 дней.";
-  $("livelyLoginNote").hidden = !(storage === "google" && !yandexIn && document.querySelector('[data-setting="livelyVoice"]').checked);
 
   // с живыми голосами язык всегда английский: показываем его, а сохранённый выбор
   // (для видео без живых голосов) возвращаем, когда их выключат
@@ -891,7 +948,10 @@ $("repoBtn").hidden = !info.repoUrl;
 $("repoBtn").onclick = () => api.openRepo();
 $("openLogs").onclick = () => api.openLogs();
 $("dzFormats").textContent = info.videoExt.map((e) => e.toUpperCase()).join(", ");
+CLOUDS = await api.clouds();
+buildCloudCards();
 await initSettings();
+storage = cloudInfo(storage).id; // облака из настроек больше нет — первое
 await refreshAccount();
 // список прошлого запуска (настройка «Сохранять список видео между запусками»): карточки с шагами,
 // файлами и прослушиванием; недоделанные main запускает после этого ответа

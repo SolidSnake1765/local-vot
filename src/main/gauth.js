@@ -24,8 +24,11 @@ async function postForm(params, signal) {
   return { ok: res.ok, data };
 }
 
-/** Вход: openUrl(url) открывает страницу Google в браузере; вернётся, когда человек разрешит доступ. */
-export async function login(openUrl, signal) {
+/**
+ * Вход: ui.openUrl(url) открывает страницу Google в браузере (ui — общий для всех облаков, см. clouds.js);
+ * вернётся, когда человек разрешит доступ.
+ */
+export async function login(ui, signal) {
   const { id, secret } = getGoogleCredentials();
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -55,7 +58,7 @@ export async function login(openUrl, signal) {
         if (error) fail(new Error(error === "access_denied" ? "Вход отменён в браузере" : `Google: ${error}`));
         else resolve(q.get("code"));
       });
-      openUrl(`${AUTH_URL}?${new URLSearchParams({
+      ui.openUrl(`${AUTH_URL}?${new URLSearchParams({
         client_id: id, redirect_uri: redirect, response_type: "code", scope: SCOPE, state,
         code_challenge: challenge, code_challenge_method: "S256",
         access_type: "offline", // ключ для обновления — чтобы не входить каждый час

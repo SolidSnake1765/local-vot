@@ -72,8 +72,8 @@ add a video, press "Start", get the translated video.
 - **What to save** — the translated video (with embedded subtitles), a separate `.m4a` audio track
   (for players with external tracks), the translation voice `.mp3`, subtitles `.srt`. Defaults are set in the
   settings and can be changed for any single video in its card.
-- **Yandex Disk or Google Drive** — choose which one passes the video to the translator in the settings
-  («Облако», Cloud). Google Drive has no monthly upload limit like Yandex Disk.
+- **Yandex Disk or Google Drive** — choose which one passes the video to the translator with the **«Облако»** (Cloud) button at the top of the window —
+  it also describes both options and lets you sign in and out. Google Drive has no monthly upload limit like Yandex Disk.
 - **Privacy** — only the audio goes to the cloud (the picture is replaced by a black frame), the link to the copy is
   open only during translation, and the copy is removed once the video leaves the list or the app is closed.
   The app's log contains no video names. See the [privacy policy](PRIVACY.md).
@@ -109,9 +109,10 @@ Settings, the Yandex sign-in and the log are kept when updating.
 
 ## How to use
 
-1. Press **«Войти через Яндекс»** (Sign in with Yandex), open the Yandex page, enter the code from the app and allow access.
-   To work through Google Drive, select it in the settings («Облако», Cloud) and press **«Войти через Google»**
-   (Sign in with Google) — the Google page opens in your browser.
+1. Press the **«Облако»** (Cloud) button at the top and choose how to pass videos to the translator: Yandex Disk or
+   Google Drive. Press **«Войти через Яндекс»** (Sign in with Yandex — open the Yandex page, enter the code from the
+   app and allow access) or **«Войти через Google»** (Sign in with Google — the Google page opens in your browser).
+   With Google Drive, also sign in to Yandex there for lively voices.
 2. Drag videos (or a whole folder) into the app window.
 3. In the video card, check the **original language** (the language spoken in the video), the voices and what
    to save, reorder the queue and press **«Запустить все»** (Start all). Defaults live in the right-hand

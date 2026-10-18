@@ -2,20 +2,18 @@
 // только к этим функциям.
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
-const EVENTS = ["auth:code", "job:update", "app:shutdown"];
+const EVENTS = ["cloud:code", "job:update", "app:shutdown"];
 
 contextBridge.exposeInMainWorld("api", {
   info: () => ipcRenderer.invoke("app:info"),
 
-  authStatus: () => ipcRenderer.invoke("auth:status"),
-  login: () => ipcRenderer.invoke("auth:login"),
-  cancelLogin: () => ipcRenderer.invoke("auth:cancel"),
-  logout: () => ipcRenderer.invoke("auth:logout"),
-  googleStatus: () => ipcRenderer.invoke("gauth:status"),
-  googleLogin: () => ipcRenderer.invoke("gauth:login"),
-  cancelGoogleLogin: () => ipcRenderer.invoke("gauth:cancel"),
-  googleLogout: () => ipcRenderer.invoke("gauth:logout"),
-  openPage: (url) => ipcRenderer.invoke("auth:openPage", url),
+  // облака (clouds.js): список, входы, вход и выход по id облака
+  clouds: () => ipcRenderer.invoke("cloud:list"),
+  cloudStatus: () => ipcRenderer.invoke("cloud:status"),
+  cloudLogin: (id) => ipcRenderer.invoke("cloud:login", id),
+  cancelCloudLogin: () => ipcRenderer.invoke("cloud:cancel"),
+  cloudLogout: (id) => ipcRenderer.invoke("cloud:logout", id),
+  openCodePage: () => ipcRenderer.invoke("cloud:openCodePage"),
   openRepo: () => ipcRenderer.invoke("app:openRepo"),
   openLogs: () => ipcRenderer.invoke("app:openLogs"),
   logError: (message) => ipcRenderer.invoke("log:renderer", message),

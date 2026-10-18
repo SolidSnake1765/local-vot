@@ -26,9 +26,10 @@ async function postForm(url, params, signal) {
 }
 
 /**
- * Вход. onCode({ userCode, url, expiresIn }) вызывается, когда код готов — его показывают пользователю.
+ * Вход. ui.showCode({ userCode, url, expiresIn }) вызывается, когда код готов — его показывают пользователю
+ * (ui — общий для всех облаков, см. clouds.js; этому входу нужен только showCode).
  */
-export async function login(onCode, signal) {
+export async function login(ui, signal) {
   const { id, secret } = getCredentials();
   const code = await postForm(`${OAUTH}/device/code`, {
     client_id: id,
@@ -37,7 +38,7 @@ export async function login(onCode, signal) {
   }, signal);
   if (code.status !== 200) throw new Error(`Яндекс не выдал код: ${code.data.error_description ?? code.data.error}`);
   const { device_code, user_code, verification_url, interval = 5, expires_in = 300 } = code.data;
-  onCode({ userCode: user_code, url: verification_url, expiresIn: expires_in });
+  ui.showCode({ userCode: user_code, url: verification_url, expiresIn: expires_in });
 
   const deadline = Date.now() + expires_in * 1000;
   while (Date.now() < deadline) {

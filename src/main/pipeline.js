@@ -77,7 +77,6 @@ function freePath(p) {
 
 const fmtSec = (s) => (s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${String(s % 60).padStart(2, "0")} с`);
 const MAX_DURATION_SEC = 4 * 3600; // предел переводчика Яндекса
-const DISK_BYTES_PER_SEC = 130_000; // если сработает ограничение Диска: ~127 КБ/с (замерено)
 
 /**
  * Копия на Диске живёт дольше одного перевода: job.diskPath сохраняется, чтобы «Перевести заново»
@@ -93,9 +92,9 @@ const DISK_BYTES_PER_SEC = 130_000; // если сработает ограни�
 export async function runJob(job, { getOptions, token, store = null, mode = "translate", makeDiskRoom, lightTurn = null,
   listPosition = () => Infinity, freeSlot = () => {} }, emit, signal) {
   const { file } = job;
-  // куда грузить копию: Яндекс Диск (по умолчанию) или Google Диск — { kind, title, api, token };
-  // token отдельно — вход в Яндекс: для живых голосов (с Google Диском его может и не быть)
-  const st = store ?? { kind: "yandex", title: "Яндекс Диск", api: disk, token };
+  // куда грузить копию — облако из clouds.js: { id, where, throttledBps, api, token } (по умолчанию Яндекс Диск);
+  // token отдельно — вход в Яндекс: для живых голосов (с другим облаком его может и не быть)
+  const st = store ?? { id: "yandex", where: "на Яндекс Диске", throttledBps: 130_000, api: disk, token };
   const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
@@ -425,7 +424,7 @@ async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, ligh
   job.origLoudness = job.origProfile?.integrated ?? null;
   step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
-  step("upload", { state: "active", detail: `Проверяем место на ${st.title.replace("Диск", "Диске")}` });
+  step("upload", { state: "active", detail: `Проверяем место ${st.where}` });
   const lightSize = (await stat(light)).size;
   const need = lightSize + 10 * MB;
   const releaseCheck = await spaceCheck.acquire(signal);
@@ -438,7 +437,7 @@ async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, ligh
       free = await available();
     }
     if (free < need) {
-      throw new Error(`На ${st.title.replace("Диск", "Диске")} не хватает места: нужно ~${size(need)}, свободно ${size(Math.max(0, free))}`
+      throw new Error(`${st.where[0].toUpperCase()}${st.where.slice(1)} не хватает места: нужно ~${size(need)}, свободно ${size(Math.max(0, free))}`
         + (reservedOnDisk ? ` (ещё ${size(reservedOnDisk)} сейчас загружают другие видео)` : "") + ". "
         + "Освободите место на Диске (и очистите его Корзину) или уменьшите «Одновременно переводить» "
         + "и нажмите «Попробовать снова».");
@@ -455,11 +454,12 @@ async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, ligh
   let timer = null;
   const waiting = () => {
     const elapsed = (Date.now() - t0) / 1000;
-    const expectedSec = lightSize / DISK_BYTES_PER_SEC;
-    const left = st.kind === "yandex" ? Math.max(0, Math.ceil(expectedSec - elapsed)) : 0;
+    // облако без ограничения скорости (throttledBps нет) — просто ждём ответа, без оценки
+    const expectedSec = st.throttledBps ? lightSize / st.throttledBps : Infinity;
+    const left = st.throttledBps ? Math.max(0, Math.ceil(expectedSec - elapsed)) : 0;
     step("upload", {
       progress: Math.min(0.99, Math.max(0.95, elapsed / expectedSec)),
-      detail: `Диск принимает файл · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
+      detail: `Облако принимает файл · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
     });
   };
   step("upload", { progress: 0, detail: `0 из ${size(lightSize)}` });
