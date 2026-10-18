@@ -4,8 +4,10 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as auth from "./auth.js";
-import { getCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
+import * as gauth from "./gauth.js";
+import { getCredentials, getGoogleCredentials, loadSettings, loadWindowState, saveSettings, saveWindowState } from "./config.js";
 import * as disk from "./yadisk.js";
+import * as gdrive from "./gdrive.js";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { readdir, rename, rm, stat } from "node:fs/promises";
 import { describeMix, origAudio, origAudioPath, profilePath, reserveDiskTurn, runJob, STEPS, translationCacheDir, wakeDiskTurn } from "./pipeline.js";
@@ -31,6 +33,7 @@ setTempDir(workRoot());
 initLog(path.join(app.getPath("userData"), "logs"));
 // ключ приложения и папка сохранения — личное, в журнале их не будет
 try { hide(getCredentials().secret, "<секрет приложения>"); } catch { /* ключей нет — войти не получится, это видно и так */ }
+try { hide(getGoogleCredentials().secret, "<секрет приложения Google>"); } catch { /* то же для Google */ }
 hide(loadSettings().outputDir, "<папка сохранения>");
 process.on("uncaughtException", (e) => log.error("программа", e));
 process.on("unhandledRejection", (e) => log.error("программа", e instanceof Error ? e : new Error(String(e))));
@@ -39,6 +42,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 // всё, что читает встроенный ffmpeg; тот же список показывает интерфейс
 const VIDEO_EXT = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "ts",
   "mpg", "mpeg", "m2ts", "mts", "3gp", "vob", "ogv"];
+
+// Куда загружается облегчённая копия для переводчика (настройка «Облако»). Копия видео помнит свой Диск
+// по пути (job.diskPath): у Google Диска он начинается с «gdrive:».
+const STORES = {
+  yandex: { kind: "yandex", title: "Яндекс Диск", api: disk, getToken: () => auth.getToken() },
+  google: { kind: "google", title: "Google Диск", api: gdrive, getToken: () => gauth.getToken() },
+};
+const storeOf = (diskPath) => (String(diskPath).startsWith(gdrive.PREFIX) ? STORES.google : STORES.yandex);
+const currentStore = () => (loadSettings().storage === "google" ? STORES.google : STORES.yandex);
 
 let win = null;
 const send = (channel, payload) => {
@@ -147,8 +159,19 @@ async function runOne(job) {
   log.info(scope, job.mode === "remux" ? "пересборка из готового перевода"
     : `перевод: ${job.lively ? "живые" : "обычные"} голоса, язык ${job.lang}${job.replace ? ", заменить прежнюю версию" : ""}`);
   try {
-    const token = await auth.getToken();
-    if (!token) throw new Error("Войдите в Яндекс, чтобы переводить видео");
+    // вход в Яндекс — для Яндекс Диска и живых голосов; с Google Диском он по желанию (только ради голосов)
+    const store = currentStore();
+    const token = store === STORES.yandex ? await auth.getToken() : await auth.getToken().catch(() => null);
+    let storeToken = null;
+    if (job.mode !== "remux") {
+      storeToken = store === STORES.yandex ? token : await gauth.getToken();
+      if (!storeToken) {
+        throw new Error(store === STORES.yandex ? "Войдите в Яндекс, чтобы переводить видео"
+          : "Войдите в Google (кнопка вверху), чтобы загружать копии на Google Диск, или выберите Яндекс Диск в настройках «Облако»");
+      }
+      // копия лежит на другом Диске (настройку «Облако» переключили) — убираем её, загрузится заново
+      if (job.diskPath && storeOf(job.diskPath) !== store) await removeDiskCopy(job);
+    }
     // настройки читаются в момент сохранения: общие + что сохранять и звук этого видео (если их меняли в карточке)
     let soundUsed = null;
     const getOptions = () => {
@@ -158,7 +181,9 @@ async function runOne(job) {
     };
     progress = progressSender(job.id);
     const freeSlot = () => { if (slots.delete(job.id)) pump(); };
-    const run = runJob(job, { getOptions, token, mode: job.mode, makeDiskRoom, lightTurn, listPosition, freeSlot }, (patch) => {
+    const storage = storeToken ? { kind: store.kind, title: store.title, api: store.api, token: storeToken } : null;
+    const run = runJob(job, { getOptions, token, store: storage, mode: job.mode, makeDiskRoom: () => makeDiskRoom(store), lightTurn,
+      listPosition, freeSlot }, (patch) => {
       if (patch.state) log[patch.state === "error" ? "warn" : "info"](scope, `${patch.step}: ${patch.state}${patch.detail ? ` — ${patch.detail}` : ""}`);
       // последнее состояние и подпись каждого шага — чтобы восстановленная карточка выглядела так же
       if (patch.step) {
@@ -264,14 +289,14 @@ ipcMain.handle("app:cancelShutdown", () => {
 });
 
 /**
- * На Яндекс Диске не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
+ * На Диске (store — Яндекс или Google) не хватает места для новой копии — убираем копии видео, которые сейчас не переводятся
  * (готовые, с ошибкой, отменённые): они нужны только для «Перевести заново» без повторной загрузки.
  * Если такое видео переведут заново, копия просто загрузится ещё раз. Возвращает, сколько копий убрано.
  */
-async function makeDiskRoom() {
+async function makeDiskRoom(store) {
   let removed = 0;
   for (const job of jobs.values()) {
-    if (!job.diskPath || ["queued", "running"].includes(job.state)) continue;
+    if (!job.diskPath || storeOf(job.diskPath) !== store || ["queued", "running"].includes(job.state)) continue;
     // мимо Корзины: в Корзине копия продолжала бы занимать место. Это временная копия программы
     // (чёрный кадр + звук), не файл пользователя
     await removeDiskCopy(job, { permanently: true });
@@ -653,11 +678,12 @@ async function removeDiskCopy(job, { permanently = null } = {}) {
   if (!job.diskPath) return;
   const diskPath = job.diskPath;
   job.diskPath = null;
-  const token = await auth.getToken().catch(() => null);
+  const store = storeOf(diskPath);
+  const token = await store.getToken().catch(() => null);
   if (!token) return;
   const { deletePermanently } = loadSettings();
-  await disk.unpublish(token, diskPath).catch(() => {});
-  await disk.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
+  await store.api.unpublish(token, diskPath).catch(() => {});
+  await store.api.remove(token, diskPath, { permanently: permanently ?? deletePermanently }).catch(() => {});
 }
 
 /**
@@ -693,20 +719,23 @@ async function shutdown() {
   await rm(workRoot(), { recursive: true, force: true, maxRetries: 3 }).catch((e) => log.warn("выход", "временная папка убрана не вся", e));
 }
 
-/** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи). */
-async function purgeLeftovers() {
-  const token = await auth.getToken().catch(() => null);
-  if (!token) return;
+/** Копии, оставшиеся с прошлого раза (приложение упало или его закрыли снятием задачи); only — один Диск. */
+async function purgeLeftovers(only = null) {
   const { deletePermanently } = loadSettings();
   const inUse = new Set([...jobs.values()].map((j) => j.diskPath).filter(Boolean));
-  let removed = 0;
-  for (const p of await disk.listAppFolder(token)) {
-    if (inUse.has(p)) continue;
-    await disk.remove(token, p, { permanently: deletePermanently })
-      .then(() => { removed++; })
-      .catch((e) => log.warn("Диск", "не удалось убрать старую копию", e));
+  for (const store of Object.values(STORES)) {
+    if (only && store !== only) continue;
+    const token = await store.getToken().catch(() => null);
+    if (!token) continue;
+    let removed = 0;
+    for (const p of await store.api.listAppFolder(token)) {
+      if (inUse.has(p)) continue;
+      await store.api.remove(token, p, { permanently: deletePermanently })
+        .then(() => { removed++; })
+        .catch((e) => log.warn(store.title, "не удалось убрать старую копию", e));
+    }
+    if (removed) log.info(store.title, `убрано копий с прошлого запуска: ${removed}`);
   }
-  if (removed) log.info("Диск", `убрано копий с прошлого запуска: ${removed}`);
 }
 
 // ---------- IPC ----------
@@ -731,7 +760,7 @@ ipcMain.handle("auth:login", async () => {
       send("auth:code", code);
       shell.openExternal(code.url);
     }, loginController.signal);
-    purgeLeftovers();
+    purgeLeftovers(STORES.yandex);
     log.info("вход", "вход в Яндекс выполнен");
     return { ok: true, status: await authStatus() };
   } catch (e) {
@@ -749,8 +778,48 @@ ipcMain.handle("auth:logout", async () => {
   // переводы окно перед этим отменило — дожидаемся, пока они закроют ссылки
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   if (running.size) await Promise.race([Promise.all(running.values()), wait(20_000)]);
-  await Promise.race([Promise.all([...jobs.values()].map((j) => removeDiskCopy(j))), wait(20_000)]);
+  const own = [...jobs.values()].filter((j) => j.diskPath && storeOf(j.diskPath) === STORES.yandex);
+  await Promise.race([Promise.all(own.map((j) => removeDiskCopy(j))), wait(20_000)]);
   auth.logout();
+});
+
+// ---------- вход в Google (для Google Диска) ----------
+async function googleStatus() {
+  const token = await gauth.getToken().catch(() => null);
+  if (!token) return { loggedIn: false };
+  try {
+    const account = await gauth.getAccount(token);
+    return account ? { loggedIn: true, ...account } : { loggedIn: false };
+  } catch (e) {
+    return { loggedIn: true, name: "Google", offline: e.message };
+  }
+}
+let googleLoginController = null;
+ipcMain.handle("gauth:status", googleStatus);
+ipcMain.handle("gauth:login", async () => {
+  googleLoginController?.abort();
+  googleLoginController = new AbortController();
+  try {
+    await gauth.login((url) => shell.openExternal(url), googleLoginController.signal);
+    purgeLeftovers(STORES.google);
+    log.info("вход", "вход в Google выполнен");
+    return { ok: true, status: await googleStatus() };
+  } catch (e) {
+    if (!/отмен/i.test(e.message)) log.warn("вход", "вход в Google не удался", e);
+    return { ok: false, error: e.message };
+  } finally {
+    googleLoginController = null;
+  }
+});
+ipcMain.handle("gauth:cancel", () => googleLoginController?.abort());
+ipcMain.handle("gauth:logout", async () => {
+  log.info("вход", "выход из Google");
+  // как с Яндексом: копии на Google Диске этого аккаунта убираем, пока вход действует
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  if (running.size) await Promise.race([Promise.all(running.values()), wait(20_000)]);
+  const own = [...jobs.values()].filter((j) => j.diskPath && storeOf(j.diskPath) === STORES.google);
+  await Promise.race([Promise.all(own.map((j) => removeDiskCopy(j))), wait(20_000)]);
+  await gauth.logout();
 });
 ipcMain.handle("auth:openPage", (_e, url) => {
   // открываем только страницы Яндекса — адрес приходит из интерфейса
@@ -1015,7 +1084,7 @@ function createWindow() {
         message: "Идёт перевод. Закрыть приложение?",
         detail: loadSettings().keepQueue
           ? "Перевод прервётся и продолжится при следующем запуске программы."
-          : "Перевод прервётся, загруженные копии будут удалены с Яндекс Диска.",
+          : "Перевод прервётся, загруженные копии будут удалены с Диска.",
       });
       if (response !== 0) return;
     }

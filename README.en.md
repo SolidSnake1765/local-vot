@@ -30,14 +30,15 @@ Yandex has great video voice-over translation, but it only works in the browser 
 
 It is built on two open-source libraries: [vot.js](https://github.com/FOSWLY/vot.js) talks to the Yandex
 translator, [ffmpeg](https://ffmpeg.org) handles audio and video. The idea is to get translations through
-**your own Yandex Disk**: the app uploads the video's audio there, shares it for the time of translation and
-passes the link to the translator. No local servers, tunnels, network setup or other complicated schemes —
+**your own Yandex Disk or Google Drive**: the app uploads the video's audio there, shares it for the time of
+translation and passes the link to the translator. No local servers, tunnels, network setup or other complicated schemes —
 add a video, press "Start", get the translated video.
 
 > [!IMPORTANT]
-> You need a **Yandex account with Yandex Disk** (the free space is enough). You sign in with a code on the
-> Yandex website — the app never sees your password. It only has access to its own folder on the Disk
-> (under "Applications") and cannot see your other files.
+> You need a **Yandex account with Yandex Disk or a Google account with Google Drive** (the free space is enough).
+> You sign in on the Yandex or Google website — the app never sees your password. It only has access to its own
+> files and cannot see your other files. With Google Drive a Yandex account is optional: without it translation
+> uses regular voices; for lively voices, sign in to Yandex once as well.
 
 > [!TIP]
 > Want translation right in the browser — for YouTube and other sites? Use the
@@ -71,8 +72,11 @@ add a video, press "Start", get the translated video.
 - **What to save** — the translated video (with embedded subtitles), a separate `.m4a` audio track
   (for players with external tracks), the translation voice `.mp3`, subtitles `.srt`. Defaults are set in the
   settings and can be changed for any single video in its card.
-- **Privacy** — only the audio goes to the Disk (the picture is replaced by a black frame), the copy is private
-  and removed once the video leaves the list or the app is closed. The app's log contains no video names.
+- **Yandex Disk or Google Drive** — choose which one passes the video to the translator in the settings
+  («Облако», Cloud). Google Drive has no monthly upload limit like Yandex Disk.
+- **Privacy** — only the audio goes to the cloud (the picture is replaced by a black frame), the link to the copy is
+  open only during translation, and the copy is removed once the video leaves the list or the app is closed.
+  The app's log contains no video names. See the [privacy policy](PRIVACY.md).
 
 ## Installation
 
@@ -84,7 +88,7 @@ Download from the [latest release](https://github.com/SolidSnake1765/local-vot/r
 | `Local-VOT-…-portable.zip` | **Portable** — unpack anywhere (even to a USB stick) and run `Local VOT.exe`. All settings and temporary files stay in its own `data` folder; nothing is left in the system. |
 
 **Requirements:** Windows 10 or 11 (64-bit; works on Windows ARM through built-in emulation), internet,
-a Yandex account. A little Disk space is needed — up to ~1 MB per minute of video while the video is in the list
+a Yandex or Google account. A little Disk space is needed — up to ~1 MB per minute of video while the video is in the list
 (if it runs out, the app removes the Disk copies of already finished videos).
 
 > [!NOTE]
@@ -106,6 +110,8 @@ Settings, the Yandex sign-in and the log are kept when updating.
 ## How to use
 
 1. Press **«Войти через Яндекс»** (Sign in with Yandex), open the Yandex page, enter the code from the app and allow access.
+   To work through Google Drive, select it in the settings («Облако», Cloud) and press **«Войти через Google»**
+   (Sign in with Google) — the Google page opens in your browser.
 2. Drag videos (or a whole folder) into the app window.
 3. In the video card, check the **original language** (the language spoken in the video), the voices and what
    to save, reorder the queue and press **«Запустить все»** (Start all). Defaults live in the right-hand
@@ -130,22 +136,24 @@ Finished files are saved next to the source video (or in the chosen folder) with
   video is about 85 MB — roughly 120 such videos a month. Mail attachments and phone photo auto-upload count too.
   When the limit is reached, the app says so: wait until it resets (30 days after the first upload), sign in with
   another Yandex account or get more Disk space. The free plan also limits a single file to 1 GB; copies of videos
-  up to 4 hours fit.
+  up to 4 hours fit. Google Drive has no such limit.
 - **Lively voices** are available for English only; if they fail, the app translates with regular voices.
-- **To revoke the app's access** to your account, use [Yandex ID](https://id.yandex.ru) — in the list of apps
-  you have allowed access.
+- **To revoke the app's access** to your account, use [Yandex ID](https://id.yandex.ru) or your
+  [Google account](https://myaccount.google.com/permissions) — in the list of apps you have allowed access.
+  «Выйти» (Sign out) in the app revokes Google access by itself.
 - **Found a bug?** Open an [issue](https://github.com/SolidSnake1765/local-vot/issues) and attach the log:
   the **«Папка логов»** (Logs folder) link at the bottom of the settings panel. The log contains no video names,
   paths or sign-in data — videos are referred to as "video #N".
 
 ## Building from source
 
-You need [Node.js](https://nodejs.org) 24 and the keys of your own app from [oauth.yandex.ru](https://oauth.yandex.ru)
-(permissions: access to the app folder on Disk and to Disk information).
+You need [Node.js](https://nodejs.org) 24 and the keys of your own apps from [oauth.yandex.ru](https://oauth.yandex.ru)
+(permissions: access to the app folder on Disk and to Disk information) and from
+[console.cloud.google.com](https://console.cloud.google.com) (Google Drive API, "Desktop app" client, `drive.file` scope).
 
 ```bash
 npm install
-copy .env.example .env      # fill in YANDEX_CLIENT_ID and YANDEX_CLIENT_SECRET
+copy .env.example .env      # fill in the Yandex and Google keys
 npm start                   # run from source
 npm test                    # checks (tests/): ~30 s, no Yandex account or keys needed
 npm run dist                # installer and portable version in the dist folder

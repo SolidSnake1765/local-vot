@@ -33,8 +33,9 @@ mock.module(src("yadisk.js"), { namedExports: {
   publish: async () => "https://disk.yandex.ru/i/x", unpublish: async () => {}, freeSpace: async () => 1e12,
 } });
 mock.module(src("vot.js"), { namedExports: {
-  translate: async (_url, _d, base, _status, _signal, opts) => {
+  translate: async (url, _d, base, _status, _signal, opts) => {
     calls.translate.push({ lively: Boolean(opts.lively), lang: opts.lang });
+    world.lastUrl = url;
     if (world.early && opts.lang !== "auto" && world.speech !== opts.lang) {
       throw Object.assign(new Error("другой язык"), { code: "LANG_MISMATCH", detectedLang: world.speech });
     }
@@ -63,7 +64,7 @@ async function run(job, opts = {}) {
   const card = [];
   const signal = new AbortController().signal;
   try {
-    const r = await runJob(full, { getOptions: () => settings, token: opts.token ?? "t", ...opts }, (p) => card.push(p), signal);
+    const r = await runJob(full, { getOptions: () => settings, ...opts, token: "token" in opts ? opts.token : "t" }, (p) => card.push(p), signal);
     return { ok: true, r, job: full, card };
   } catch (e) {
     return { ok: false, error: e.message, job: full, card };
@@ -161,6 +162,31 @@ test("по одному: копии строго по одной", async () => {
   } finally {
     settings.diskJobs = 2;
   }
+});
+
+test("Google Диск: копия туда и ссылка оттуда; без входа в Яндекс живые голоса — обычными, с подсказкой", async () => {
+  const google = [];
+  const api = {
+    upload: async (tok) => { google.push(["upload", tok]); return "gdrive:F"; },
+    publish: async (tok, ref) => { google.push(["publish", tok, ref]); return "https://drive.google.com/file/d/F/view?t=1"; },
+    unpublish: async (tok, ref) => { google.push(["unpublish", tok, ref]); },
+    freeSpace: async () => 1e12,
+  };
+  const t = await run({ lively: true, lang: "en" }, { token: null, store: { kind: "google", title: "Google Диск", api, token: "g" } });
+  assert.equal(t.ok, true, t.error);
+  assert.equal(calls.upload, 0, "Яндекс Диск не трогали");
+  assert.equal(t.job.diskPath, "gdrive:F");
+  assert.equal(world.lastUrl, "https://drive.google.com/file/d/F/view?t=1");
+  assert.deepEqual(google.map((c) => c[0]), ["upload", "unpublish", "publish", "unpublish"]);
+  assert.ok(google.every((c) => c[1] === "g"), "везде вход Google");
+  assert.deepEqual(calls.translate, [{ lively: false, lang: "en" }], "живые голоса без входа в Яндекс не просим");
+  assert.equal(t.job.lively, true, "пометка «живые» остаётся — после входа можно пересоздать");
+  assert.match(t.card.findLast((p) => p.step === "translate" && p.state === "done").detail, /войдите в Яндекс/);
+  assert.match(t.card.find((p) => p.step === "upload" && p.state === "active").detail, /Google Диске/);
+  // со входом в Яндекс — живые голоса и с Google Диском
+  const t2 = await run({ lively: true, lang: "en" }, { token: "y", store: { kind: "google", title: "Google Диск", api, token: "g" } });
+  assert.equal(t2.ok, true, t2.error);
+  assert.deepEqual(calls.translate.at(-1), { lively: true, lang: "en" });
 });
 
 test.after(() => rmSync(root, { recursive: true, force: true }));

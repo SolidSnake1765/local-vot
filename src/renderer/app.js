@@ -9,7 +9,10 @@ const STATE_LABEL = { idle: "Ожидает запуска", queued: "В оче�
 let STEPS = [];
 let LANGS = [];
 let LIVELY_LANG = "en";
-let loggedIn = false;
+let loggedIn = false; // можно переводить: есть вход туда, куда загружаются копии (настройка «Облако»)
+let yandexIn = false;
+let googleIn = false;
+let storage = "yandex";
 const langName = (code) => LANGS.find((l) => l.code === code)?.name ?? code;
 
 const fmtTime = (sec) => {
@@ -32,35 +35,98 @@ const cards = new Map(); // id задания → элементы карточ�
 // задание стартует сразу после добавления, и первые события могут прийти раньше, чем появится карточка
 const early = new Map(); // id → события, ждущие своей карточки
 
-// ---------- вход в Яндекс ----------
+// ---------- вход в Яндекс и Google ----------
+/** «Яндекс: имя · Диск 0.6 из 10 ГБ ▬» — в строку шапки; withDisk — показывать место на Диске. */
+function renderAccountLine(text, who, s, withDisk) {
+  text.textContent = "";
+  text.append(`${who}: `);
+  const b = document.createElement("b");
+  b.textContent = s.name;
+  text.append(b);
+  if (!withDisk || !s.totalBytes) return;
+  text.append(` · Диск ${(s.usedBytes / 1024 ** 3).toFixed(1)} из ${(s.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
+  const meter = document.createElement("span");
+  meter.className = "disk-meter";
+  meter.title = `Занято ${Math.round((s.usedBytes / s.totalBytes) * 100)}%`;
+  const fill = document.createElement("i");
+  fill.style.width = `${Math.min(100, (s.usedBytes / s.totalBytes) * 100)}%`;
+  meter.append(fill);
+  text.append(meter);
+}
+
 async function refreshAccount() {
-  const s = await api.authStatus();
-  loggedIn = s.loggedIn;
+  const [s, g] = await Promise.all([api.authStatus(), api.googleStatus()]);
+  yandexIn = s.loggedIn;
+  googleIn = g.loggedIn;
+  const google = storage === "google";
+  loggedIn = google ? googleIn : yandexIn;
+  // Яндекс: с Яндекс Диском — обязателен (и показываем место на Диске), с Google Диском — ради живых голосов
   const text = $("accountText");
   const btn = $("accountBtn");
   btn.hidden = false;
   if (s.loggedIn) {
-    text.textContent = "";
-    text.append("Яндекс: ");
-    const b = document.createElement("b");
-    b.textContent = s.name;
-    text.append(b);
-    if (s.totalBytes) {
-      text.append(` · Диск ${(s.usedBytes / 1024 ** 3).toFixed(1)} из ${(s.totalBytes / 1024 ** 3).toFixed(0)} ГБ`);
-      const meter = document.createElement("span");
-      meter.className = "disk-meter";
-      meter.title = `Занято ${Math.round((s.usedBytes / s.totalBytes) * 100)}%`;
-      const fill = document.createElement("i");
-      fill.style.width = `${Math.min(100, (s.usedBytes / s.totalBytes) * 100)}%`;
-      meter.append(fill);
-      text.append(meter);
-    }
+    renderAccountLine(text, "Яндекс", s, !google);
     btn.textContent = "Выйти";
   } else {
-    text.textContent = "Для перевода нужен вход в Яндекс";
+    text.textContent = google ? "Яндекс — для живых голосов" : "Для перевода нужен вход в Яндекс";
     btn.textContent = "Войти через Яндекс";
   }
+  // Google — когда выбран Google Диск или вход уже есть (чтобы можно было выйти)
+  $("gAccount").hidden = !google && !g.loggedIn;
+  if (g.loggedIn) {
+    renderAccountLine($("gAccountText"), "Google", g, google);
+    $("gAccountBtn").textContent = "Выйти";
+  } else {
+    $("gAccountText").textContent = "Для Google Диска нужен вход в Google";
+    $("gAccountBtn").textContent = "Войти через Google";
+  }
+  syncDependent();
 }
+
+/** Войти туда, куда загружаются копии (настройка «Облако»). */
+const startNeededLogin = () => (storage === "google" ? startGoogleLogin() : startLogin());
+
+async function startGoogleLogin() {
+  $("gLoginModal").hidden = false;
+  $("gLoginWait").hidden = false;
+  $("gLoginError").hidden = true;
+  const r = await api.googleLogin();
+  if (r.ok) {
+    $("gLoginModal").hidden = true;
+    await refreshAccount();
+  } else if (!/отмен/i.test(r.error)) {
+    $("gLoginWait").hidden = true;
+    $("gLoginError").textContent = r.error;
+    $("gLoginError").hidden = false;
+  } else {
+    $("gLoginModal").hidden = true;
+  }
+}
+$("gLoginCancel").onclick = () => { api.cancelGoogleLogin(); $("gLoginModal").hidden = true; };
+
+/** Выход: если идут переводы — спросить (они будут отменены), потом выйти и обновить шапку. */
+async function logoutFrom(btn, title, logout) {
+  const busy = [...cards.values()].filter((c) => c.state === "running" || c.state === "queued").length;
+  if (busy) {
+    const ok = await askUser({
+      title,
+      text: `Переводятся или ждут очереди: ${busy}. Они будут отменены — потом их можно запустить снова `
+        + "уже с другим входом. Копии видео на Диске этого аккаунта уберутся.",
+      buttons: [{ label: "Выйти", value: true, kind: "danger" }, { label: "Не выходить", value: null, kind: "ghost" }],
+    });
+    if (!ok) return;
+    await api.cancelAll();
+  }
+  btn.disabled = true;
+  btn.textContent = "Выходим…";
+  try {
+    await logout();
+  } finally {
+    btn.disabled = false;
+  }
+  await refreshAccount();
+}
+$("gAccountBtn").onclick = () => (googleIn ? logoutFrom($("gAccountBtn"), "Выйти из Google?", api.googleLogout) : startGoogleLogin());
 
 async function startLogin() {
   $("loginModal").hidden = false;
@@ -90,40 +156,13 @@ api.on("auth:code", ({ userCode, url }) => {
 $("openCodePage").onclick = () => api.openPage(codeUrl);
 $("copyCode").onclick = () => navigator.clipboard.writeText($("codeText").textContent);
 $("loginCancel").onclick = () => { api.cancelLogin(); $("loginModal").hidden = true; };
-$("accountBtn").onclick = async () => {
-  if (loggedIn) {
-    // выход прерывает переводы этого аккаунта — спросить, если они идут
-    const list = [...cards.values()];
-    const busy = list.filter((c) => c.state === "running" || c.state === "queued").length;
-    if (busy) {
-      const ok = await askUser({
-        title: "Выйти из Яндекса?",
-        text: `Переводятся или ждут очереди: ${busy}. Они будут отменены — потом их можно запустить снова `
-          + "уже с другим входом. Копии видео на Диске этого аккаунта уберутся.",
-        buttons: [{ label: "Выйти", value: true, kind: "danger" }, { label: "Не выходить", value: null, kind: "ghost" }],
-      });
-      if (!ok) return;
-      await api.cancelAll();
-    }
-    const btn = $("accountBtn");
-    btn.disabled = true;
-    btn.textContent = "Выходим…";
-    try {
-      await api.logout();
-    } finally {
-      btn.disabled = false;
-    }
-    await refreshAccount();
-  } else {
-    startLogin();
-  }
-};
+$("accountBtn").onclick = () => (yandexIn ? logoutFrom($("accountBtn"), "Выйти из Яндекса?", api.logout) : startLogin());
 
 // ---------- добавление видео ----------
 async function addFiles(paths) {
   if (!paths.length) return;
   if (!loggedIn) {
-    startLogin();
+    startNeededLogin();
     return;
   }
   const { added, note, error } = await api.addJobs(paths);
@@ -622,7 +661,7 @@ $("clearList").onclick = async () => {
   const mode = await askUser({
     title: "Очистить список?",
     text: (info.running ? "Видео, которые переводятся прямо сейчас, останутся. " : "")
-      + "Файлы на компьютере не удаляются. Копии этих видео на Яндекс Диске и полученные переводы удалятся — "
+      + "Файлы на компьютере не удаляются. Копии этих видео на Диске и полученные переводы удалятся — "
       + "«Пересобрать видео» для них будет недоступно.",
     buttons,
   });
@@ -652,7 +691,7 @@ api.on("app:shutdown", async ({ seconds, keepQueue }) => {
   $("shutdownAfter").checked = false;
   let left = seconds;
   const text = () => `Очередь закончилась. Компьютер выключится через ${left} с. `
-    + (keepQueue ? "Список видео сохранится до следующего запуска." : "Копии видео с Яндекс Диска программа перед этим уберёт сама.");
+    + (keepQueue ? "Список видео сохранится до следующего запуска." : "Копии видео с Диска программа перед этим уберёт сама.");
   const tick = setInterval(() => {
     left = Math.max(0, left - 1);
     $("askText").textContent = text();
@@ -768,6 +807,7 @@ async function initSettings() {
     $("originalVolume").append(opt);
   }
   const s = await api.getSettings();
+  storage = s.storage;
   for (const k of SAVE_KEYS) saveDefaults[k] = s[k];
   for (const el of document.querySelectorAll("[data-setting]")) {
     const key = el.dataset.setting;
@@ -777,6 +817,10 @@ async function initSettings() {
       const numeric = el.type === "range" || el.dataset.type === "number";
       const value = el.type === "checkbox" ? el.checked : numeric ? Number(el.value) : el.value;
       api.setSettings({ [key]: value });
+      if (key === "storage") {
+        storage = value;
+        refreshAccount().catch(() => {}); // в шапке — нужный вход
+      }
       syncDependent();
       if (SAVE_KEYS.includes(key)) {
         saveDefaults[key] = value;
@@ -807,6 +851,11 @@ function syncDependent() {
   }[$("videoFormat").value] ?? "MP4 останется MP4, AVI — AVI и т. д. Если формат не справится (например, FLV), сохраним в MKV и напишем почему. В AVI, WMV, TS, MPG, OGV субтитры не встраиваются — лягут файлом рядом.";
   $("saveNone").hidden = ["saveVideo", "saveAudio", "saveVoice", "saveSubs"]
     .some((k) => document.querySelector(`[data-setting="${k}"]`).checked);
+
+  $("storageNote").textContent = storage === "google"
+    ? "Нужен вход в Google. Месячного лимита загрузки нет; программа видит на Google Диске только свои копии. Без входа в Яндекс — только обычные голоса."
+    : "Нужен вход в Яндекс. Бесплатный Яндекс Диск принимает не больше 10 ГБ загрузок за 30 дней.";
+  $("livelyLoginNote").hidden = !(storage === "google" && !yandexIn && document.querySelector('[data-setting="livelyVoice"]').checked);
 
   // с живыми голосами язык всегда английский: показываем его, а сохранённый выбор
   // (для видео без живых голосов) возвращаем, когда их выключат

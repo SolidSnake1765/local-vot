@@ -22,9 +22,15 @@
         <div class="brand-sub">Закадровый перевод видео на русский</div>
       </div>
     </div>
-    <div class="account" id="account">
-      <span class="account-text" id="accountText">Проверяем вход…</span>
-      <button class="btn btn-ghost" id="accountBtn" hidden></button>
+    <div class="accounts">
+      <div class="account" id="account">
+        <span class="account-text" id="accountText">Проверяем вход…</span>
+        <button class="btn btn-ghost btn-small" id="accountBtn" hidden></button>
+      </div>
+      <div class="account" id="gAccount" hidden>
+        <span class="account-text" id="gAccountText"></span>
+        <button class="btn btn-ghost btn-small" id="gAccountBtn"></button>
+      </div>
     </div>
   </header>
 
@@ -108,6 +114,7 @@
       <p class="note tight">Без галочки видео ждут кнопки «Старт» или «Запустить все» — можно расставить порядок.</p>
       <label class="check"><input type="checkbox" data-setting="livelyVoice"> Живые голоса</label>
       <p class="note tight">Голоса, похожие на оригинальных говорящих. Работают только с английского.</p>
+      <p class="note warn" id="livelyLoginNote" hidden>С Google Диском живые голоса — только со входом в Яндекс (кнопка вверху). Без него видео переведутся обычными голосами.</p>
       <label class="select">
         <span>Язык оригинала</span>
         <select data-setting="sourceLang" id="settingsLang"></select>
@@ -136,7 +143,7 @@
       <label class="check"><input type="checkbox" data-setting="keepQueue"> Сохранять список видео между запусками</label>
       <p class="note tight">Закрыли программу посреди очереди — при следующем запуске список на месте, недоделанные
         видео продолжатся сами (уже загруженное на Диск заново не грузится, перевод у Яндекса начнётся заново).
-        Копии видео на Яндекс Диске остаются, пока видео в списке.</p>
+        Копии видео на Диске остаются, пока видео в списке.</p>
       <label class="check"><input type="checkbox" id="shutdownAfter"> Выключить компьютер, когда очередь закончится</label>
       <p class="note tight">Только на этот раз — после перезапуска программы галочка снята. Перед выключением —
         минута, чтобы передумать.</p>
@@ -164,9 +171,17 @@
       <label class="check"><input type="checkbox" data-setting="fastAudio"> Быстрое кодирование звука</label>
       <p class="note tight">Звук собирается примерно вдвое быстрее, качество чуть ниже. Без галочки звук с переводом сохраняется не хуже оригинала: битрейт как у него — от 192 до 256 кбит/с (выше AAC на слух уже не лучше).</p>
 
-      <h2>Яндекс Диск</h2>
+      <h2>Облако</h2>
+      <label class="select">
+        <span>Куда загружать копию для перевода</span>
+        <select data-setting="storage" id="storage">
+          <option value="yandex">Яндекс Диск</option>
+          <option value="google">Google Диск</option>
+        </select>
+      </label>
+      <p class="note tight" id="storageNote"></p>
       <label class="check"><input type="checkbox" data-setting="deletePermanently"> Удалять копию с Диска сразу, мимо Корзины</label>
-      <p class="note">Через Диск видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром). Копия хранится закрытой, пока видео в списке, и удаляется при «Убрать из списка» или выходе.</p>
+      <p class="note">Через облако видео передаётся переводчику. Загружается только звук (картинка заменяется чёрным кадром). Ссылка на копию открыта только на время перевода; сама копия хранится, пока видео в списке, и удаляется при «Убрать из списка» или выходе.</p>
       <footer class="panel-foot">
         Local VOT <span id="appVersion"></span> · автор <b>SolidSnake</b>
         <button class="link-btn" id="openLogs" type="button" title="Журнал работы программы — пригодится, если что-то сломалось. Имён видео в нём нет">Папка логов</button>
@@ -201,6 +216,19 @@
       </div>
       <p class="error" id="loginError" hidden></p>
       <button class="btn btn-ghost modal-close" id="loginCancel" type="button">Отмена</button>
+    </div>
+  </div>
+
+  <div class="modal" id="gLoginModal" hidden>
+    <div class="modal-card">
+      <h2>Вход в Google</h2>
+      <div id="gLoginWait">
+        <div class="spinner big"></div>
+        <p>В браузере открылась страница Google: войдите и разрешите Local VOT доступ к Google Диску.</p>
+        <p class="muted small">Программа увидит только файлы, которые создаст сама. Пароль от Google программа не видит.</p>
+      </div>
+      <p class="error" id="gLoginError" hidden></p>
+      <button class="btn btn-ghost modal-close" id="gLoginCancel" type="button">Отмена</button>
     </div>
   </div>
 
@@ -298,7 +326,7 @@
         </div>
         <div class="action-row">
           <button class="btn btn-small btn-ghost job-remove" type="button">Убрать из списка</button>
-          <span class="muted small">Также удаляет копию видео с Яндекс Диска. Файлы на компьютере остаются.</span>
+          <span class="muted small">Также удаляет копию видео с Диска. Файлы на компьютере остаются.</span>
         </div>
       </div>
     </article>

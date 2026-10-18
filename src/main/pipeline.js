@@ -26,7 +26,7 @@ const diskTurn = workPool((kind, busy) => {
 /** Настройку «Копия и сборка» поменяли — пустить ожидающих, если теперь можно больше. */
 export const wakeDiskTurn = () => diskTurn.wake();
 
-// Место на Яндекс Диске при нескольких загрузках сразу: свободное место видно только после того, как файл
+// Место на Диске (Яндекс или Google) при нескольких загрузках сразу: свободное место видно только после того, как файл
 // загружен, поэтому уже начатые загрузки «бронируют» свой объём, а проверка идёт по одной (spaceCheck),
 // чтобы два видео не увидели одно и то же свободное место.
 const spaceCheck = limiter(1);
@@ -59,7 +59,7 @@ async function waitDiskTurn(step, stepId, signal, ticket = null, priority = Infi
 
 export const STEPS = [
   { id: "light", title: "Облегчённая копия" },
-  { id: "upload", title: "Загрузка на Яндекс Диск" },
+  { id: "upload", title: "Загрузка на Диск" },
   { id: "translate", title: "Перевод" },
   { id: "cleanup", title: "Закрытие ссылки" },
   { id: "save", title: "Сохранение результата" },
@@ -90,9 +90,12 @@ const DISK_BYTES_PER_SEC = 130_000; // если сработает ограни�
  * @param emit  ({ step, state?: "active"|"done"|"error", progress?: 0..1, detail?: string }) — ход работы
  * @returns { outputs: string[], lively: boolean, lang: string } — созданные файлы, голос и язык перевода
  */
-export async function runJob(job, { getOptions, token, mode = "translate", makeDiskRoom, lightTurn = null, listPosition = () => Infinity,
-  freeSlot = () => {} }, emit, signal) {
+export async function runJob(job, { getOptions, token, store = null, mode = "translate", makeDiskRoom, lightTurn = null,
+  listPosition = () => Infinity, freeSlot = () => {} }, emit, signal) {
   const { file } = job;
+  // куда грузить копию: Яндекс Диск (по умолчанию) или Google Диск — { kind, title, api, token };
+  // token отдельно — вход в Яндекс: для живых голосов (с Google Диском его может и не быть)
+  const st = store ?? { kind: "yandex", title: "Яндекс Диск", api: disk, token };
   const work = path.join(workRoot(), `${job.id}-${Date.now()}`);
   mkdirSync(work, { recursive: true });
   const name = path.parse(file).name;
@@ -120,9 +123,9 @@ export async function runJob(job, { getOptions, token, mode = "translate", makeD
         emit({ step: "light", state: "done", detail: "" });
         emit({ step: "upload", state: "done", detail: "Файл уже на Диске" });
       } else {
-        await uploadCopy(job, work, token, step, signal, makeDiskRoom, lightTurn);
+        await uploadCopy(job, work, st, step, signal, makeDiskRoom, lightTurn);
       }
-      ({ result, lively, lang } = await translateOnce(job, work, token, step, emit, signal));
+      ({ result, lively, lang } = await translateOnce(job, work, st, token, step, emit, signal));
       job.translation = await keepTranslation(job, result, lively, lang, signal);
       result = job.translation;
     }
@@ -375,8 +378,9 @@ function diskFullError(e) {
     + "Выберите папку на другом диске в настройках «Куда» или освободите место и нажмите «Перевести заново».");
 }
 
-/** Облегчённая копия и загрузка её на Диск; заполняет job.diskPath и job.duration. */
-async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, lightTurn = null) {
+/** Облегчённая копия и загрузка её на Диск (st — см. runJob); заполняет job.diskPath и job.duration. */
+async function uploadCopy(job, work, st, step, signal, makeDiskRoom = null, lightTurn = null) {
+  const { token } = st;
   if (uploadBlock?.token === token && Date.now() < uploadBlock.until) {
     step("upload", { state: "active", detail: "" });
     throw uploadBlock.error;
@@ -421,12 +425,12 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   job.origLoudness = job.origProfile?.integrated ?? null;
   step("light", { state: "done", detail: job.origLoudness !== null ? `Громкость оригинала ${job.origLoudness.toFixed(1)} LUFS` : "" });
 
-  step("upload", { state: "active", detail: "Проверяем место на Яндекс Диске" });
+  step("upload", { state: "active", detail: `Проверяем место на ${st.title.replace("Диск", "Диске")}` });
   const lightSize = (await stat(light)).size;
   const need = lightSize + 10 * MB;
   const releaseCheck = await spaceCheck.acquire(signal);
   try {
-    const available = async () => (await disk.freeSpace(token, signal).catch(() => Infinity)) - reservedOnDisk;
+    const available = async () => (await st.api.freeSpace(token, signal).catch(() => Infinity)) - reservedOnDisk;
     let free = await available();
     // не хватает — убираем копии видео, которые сейчас не переводятся (нужны только для «Перевести заново»)
     if (free < need && makeDiskRoom && (await makeDiskRoom()) > 0) {
@@ -434,7 +438,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
       free = await available();
     }
     if (free < need) {
-      throw new Error(`На Яндекс Диске не хватает места: нужно ~${size(need)}, свободно ${size(Math.max(0, free))}`
+      throw new Error(`На ${st.title.replace("Диск", "Диске")} не хватает места: нужно ~${size(need)}, свободно ${size(Math.max(0, free))}`
         + (reservedOnDisk ? ` (ещё ${size(reservedOnDisk)} сейчас загружают другие видео)` : "") + ". "
         + "Освободите место на Диске (и очистите его Корзину) или уменьшите «Одновременно переводить» "
         + "и нажмите «Попробовать снова».");
@@ -446,13 +450,13 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   // Обычно загрузка идёт на полной скорости (см. UPLOAD_LINK_HEADERS в yadisk.js) — показываем
   // отправленные байты и скорость. Если Яндекс всё же ограничит скорость (~127 КБ/с), байты уйдут
   // в буфер сети за секунды, а сервер будет принимать файл минутами — тогда фаза «ожидания»
-  // с оценкой по этой скорости.
+  // с оценкой по этой скорости. У Google Диска такого ограничения нет — там просто ждём ответа.
   const t0 = Date.now();
   let timer = null;
   const waiting = () => {
     const elapsed = (Date.now() - t0) / 1000;
     const expectedSec = lightSize / DISK_BYTES_PER_SEC;
-    const left = Math.max(0, Math.ceil(expectedSec - elapsed));
+    const left = st.kind === "yandex" ? Math.max(0, Math.ceil(expectedSec - elapsed)) : 0;
     step("upload", {
       progress: Math.min(0.99, Math.max(0.95, elapsed / expectedSec)),
       detail: `Диск принимает файл · ` + (left > 0 ? `осталось ~${fmtSec(left)}` : "почти готово"),
@@ -460,7 +464,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
   };
   step("upload", { progress: 0, detail: `0 из ${size(lightSize)}` });
   try {
-    job.diskPath = await disk.upload(token, light, ({ phase, sent }) => {
+    job.diskPath = await st.api.upload(token, light, ({ phase, sent }) => {
       if (phase === "sending") {
         const sec = Math.max(0.001, (Date.now() - t0) / 1000);
         step("upload", { progress: 0.95 * sent / lightSize, detail: `${size(sent)} из ${size(lightSize)} · ${(sent / MB / sec).toFixed(1)} МБ/с` });
@@ -485,7 +489,7 @@ async function uploadCopy(job, work, token, step, signal, makeDiskRoom = null, l
  * Один запрос перевода. Каждый раз — новая публичная ссылка: Яндекс кэширует перевод по ссылке
  * (bypassCache не помогает), а после переопубликации Диск выдаёт новую, и перевод делается заново.
  */
-async function translateOnce(job, work, token, step, emit, signal) {
+async function translateOnce(job, work, st, token, step, emit, signal) {
   let lastStatus = "";
   const onStatus = (msg) => {
     if (msg !== lastStatus) log.info(`видео #${job.no}`, `Яндекс: ${msg}`);
@@ -496,13 +500,21 @@ async function translateOnce(job, work, token, step, emit, signal) {
   let lively = Boolean(job.lively);
   // живые голоса — только с английского (и не с автоопределением), интерфейс держит это же правило
   let lang = lively ? LIVELY_LANG : (job.lang || "auto");
+  // живые голоса Яндекс даёт только вошедшим в Яндекс (проверено 18.10: без входа — «нужна авторизация»);
+  // с Google Диском входа может и не быть — тогда обычными голосами, с тем же языком. Видео остаётся с пометкой
+  // «живые» — после входа его можно пересоздать живыми голосами
+  const noVoiceLogin = lively && !token;
+  if (noVoiceLogin) {
+    lively = false;
+    log.info(`видео #${job.no}`, "живые голоса — только со входом в Яндекс; переводим обычными");
+  }
   let result;
   try {
     step("translate", { state: "active", detail: "Открываем доступ к файлу" });
-    await disk.unpublish(token, job.diskPath).catch(() => {}); // вдруг осталась открытой с прошлого раза
+    await st.api.unpublish(st.token, job.diskPath).catch(() => {}); // вдруг осталась открытой с прошлого раза
     let url;
     try {
-      url = await disk.publish(token, job.diskPath, signal);
+      url = await st.api.publish(st.token, job.diskPath, signal);
     } catch (e) {
       if (/\(404\)|не найден/i.test(e.message)) {
         job.diskPath = null; // копию удалили с Диска вручную — в следующий раз загрузим заново
@@ -555,14 +567,14 @@ async function translateOnce(job, work, token, step, emit, signal) {
       : langName(lang).toLowerCase();
     step("translate", {
       state: "done",
-      detail: [lively ? "Живые голоса" : "Обычные голоса", langText,
+      detail: [lively ? "Живые голоса" : noVoiceLogin ? "Обычные голоса (для живых войдите в Яндекс)" : "Обычные голоса", langText,
         result.subsCount ? `${result.subsCount} строк субтитров` : ""].filter(Boolean).join(" · "),
     });
   } finally {
     // что бы ни случилось — не оставляем файл висеть по открытой ссылке
     if (job.diskPath) {
       emit({ step: "cleanup", state: "active", detail: "" });
-      await disk.unpublish(token, job.diskPath)
+      await st.api.unpublish(st.token, job.diskPath)
         .then(() => emit({ step: "cleanup", state: "done", detail: "Ссылка закрыта · копия на Диске, пока видео в списке" }))
         .catch((e) => emit({ step: "cleanup", state: "error", detail: `Не удалось закрыть ссылку: ${e.message}` }));
     }

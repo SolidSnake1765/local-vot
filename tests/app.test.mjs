@@ -160,6 +160,42 @@ test("выключить компьютер после очереди: отсч�
   }
 });
 
+test("Google Диск без входов: в шапке вход в Google и Яндекс «для живых голосов», подсказки, понятная ошибка", { skip, timeout: 120_000 }, async () => {
+  const dir = path.join(base, "google");
+  mkdirSync(path.join(dir, "profile"), { recursive: true });
+  const job = { id: id(7), no: 1, file: video, name: "clip.mp4", state: "queued", lively: true, lang: "en", outputs: [] };
+  writeFileSync(path.join(dir, "profile", "queue.json"), JSON.stringify({ version: 1, jobs: [job], order: [job.id] }));
+  writeFileSync(path.join(dir, "profile", "settings.json"), JSON.stringify({ keepQueue: true, storage: "google", livelyVoice: true }));
+  const app = await launch(dir, 9354);
+  try {
+    await app.waitFor(`document.querySelector('.job[data-id="${id(7)}"]')?.dataset.state === "error"`);
+    const ui = await app.evaluate(`({
+      google: document.getElementById("gAccount").hidden ? null : document.getElementById("gAccountText").textContent,
+      googleBtn: document.getElementById("gAccountBtn").textContent,
+      yandex: document.getElementById("accountText").textContent,
+      storage: document.getElementById("storage").value,
+      storageNote: document.getElementById("storageNote").textContent,
+      livelyNote: !document.getElementById("livelyLoginNote").hidden,
+      error: document.querySelector(".job-error").textContent,
+    })`);
+    assert.equal(ui.google, "Для Google Диска нужен вход в Google");
+    assert.equal(ui.googleBtn, "Войти через Google");
+    assert.equal(ui.yandex, "Яндекс — для живых голосов");
+    assert.equal(ui.storage, "google");
+    assert.match(ui.storageNote, /Месячного лимита загрузки нет/);
+    assert.ok(ui.livelyNote, "подсказка: живые голоса — со входом в Яндекс");
+    assert.match(ui.error, /Войдите в Google/);
+    // переключили на Яндекс Диск — строка Google уходит (входа в Google нет), подсказка о голосах тоже
+    await app.evaluate(`(() => { const s = document.getElementById("storage"); s.value = "yandex"; s.dispatchEvent(new Event("change")); })()`);
+    assert.ok(await app.waitFor(`document.getElementById("gAccount").hidden && document.getElementById("accountText").textContent === "Для перевода нужен вход в Яндекс"`, 10_000));
+    assert.equal(await app.evaluate(`document.getElementById("livelyLoginNote").hidden`), true);
+    assert.ok(await app.close(), "программа закрылась");
+  } finally {
+    app.kill();
+  }
+  assert.equal(JSON.parse(readFileSync(path.join(dir, "profile", "settings.json"), "utf8")).storage, "yandex", "выбор сохранился");
+});
+
 test.after(async () => {
   await sleep(500);
   rmSync(base, { recursive: true, force: true, maxRetries: 5 });

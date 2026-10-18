@@ -1,14 +1,11 @@
 // Вход в Яндекс по коду подтверждения (OAuth device flow): приложение показывает код,
 // пользователь вводит его на странице Яндекса и разрешает доступ. Пароль приложение не видит.
-// Токен хранится в папке данных приложения, зашифрованный средствами Windows (safeStorage).
-import { app, safeStorage } from "electron";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// Токен хранится в папке данных приложения, зашифрованный средствами Windows (secret.js).
 import { hostname } from "node:os";
-import path from "node:path";
 import { getCredentials } from "./config.js";
+import { tokenStore } from "./secret.js";
 
 const OAUTH = "https://oauth.yandex.ru";
-const tokenFile = () => path.join(app.getPath("userData"), "yandex-token.bin");
 // слушатель отмены снимается и после паузы: за 5 минут ожидания кода — 60 пауз
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
   const onAbort = () => { clearTimeout(t); reject(new Error("Вход отменён")); };
@@ -16,27 +13,7 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal?.addEventListener("abort", onAbort, { once: true });
 });
 
-// токен нужен каждому видео и каждому удалению копии с Диска — с диска читаем один раз, дальше из памяти
-// (undefined — ещё не читали, null — входа нет)
-let cached;
-
-function saveToken(token) {
-  const json = JSON.stringify(token);
-  const data = safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(json) : Buffer.from(json);
-  writeFileSync(tokenFile(), data);
-  cached = token;
-}
-
-function loadToken() {
-  if (cached !== undefined) return cached;
-  cached = null;
-  if (!existsSync(tokenFile())) return null;
-  const buf = readFileSync(tokenFile());
-  try {
-    cached = JSON.parse(safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString());
-  } catch { /* файл испорчен — нужен новый вход */ }
-  return cached;
-}
+const store = tokenStore("yandex-token.bin");
 
 async function postForm(url, params, signal) {
   const res = await fetch(url, {
@@ -69,7 +46,7 @@ export async function login(onCode, signal) {
       grant_type: "device_code", code: device_code, client_id: id, client_secret: secret,
     }, signal);
     if (tok.status === 200) {
-      saveToken({ ...tok.data, obtained_at: Date.now() });
+      store.save({ ...tok.data, obtained_at: Date.now() });
       return;
     }
     if (tok.data.error !== "authorization_pending") {
@@ -86,7 +63,7 @@ async function refresh(token) {
   });
   if (tok.status !== 200) return null;
   const fresh = { ...tok.data, obtained_at: Date.now() };
-  saveToken(fresh);
+  store.save(fresh);
   return fresh;
 }
 
@@ -95,7 +72,7 @@ let refreshing = null;
 
 /** Действующий токен (при необходимости обновлённый) или null, если нужен вход. */
 export async function getToken() {
-  const token = loadToken();
+  const token = store.load();
   if (!token) return null;
   const expiresAt = token.obtained_at + token.expires_in * 1000;
   if (Date.now() < expiresAt - 24 * 3600_000) return token.access_token;
@@ -118,6 +95,5 @@ export async function getAccount(token) {
 }
 
 export function logout() {
-  rmSync(tokenFile(), { force: true });
-  cached = null;
+  store.clear();
 }

@@ -9,13 +9,26 @@ import { fileURLToPath } from "node:url";
  * в собранной программе — из credentials.json рядом с этим файлом (его пишет scripts/embed-credentials.mjs).
  */
 export function getCredentials() {
+  return credentials("YANDEX", "yandex", "Яндекса");
+}
+
+/** То же для приложения Google (console.cloud.google.com, «Desktop app»): GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET. */
+export function getGoogleCredentials() {
+  return credentials("GOOGLE", "google", "Google");
+}
+
+function credentials(prefix, key, who) {
   const envFile = path.join(app.getAppPath(), ".env");
   if (existsSync(envFile)) process.loadEnvFile(envFile);
-  let { YANDEX_CLIENT_ID: id, YANDEX_CLIENT_SECRET: secret } = process.env;
+  let { [`${prefix}_CLIENT_ID`]: id, [`${prefix}_CLIENT_SECRET`]: secret } = process.env;
   const embedded = path.join(path.dirname(fileURLToPath(import.meta.url)), "credentials.json");
-  if ((!id || !secret) && existsSync(embedded)) ({ id, secret } = JSON.parse(readFileSync(embedded, "utf8")));
+  if ((!id || !secret) && existsSync(embedded)) {
+    const all = JSON.parse(readFileSync(embedded, "utf8"));
+    // ключи Яндекса до 0.5.0 лежали в корне файла
+    ({ id, secret } = all[key] ?? (key === "yandex" ? all : {}));
+  }
   if (!id || !secret) {
-    throw new Error("Не заданы ключи приложения Яндекса: YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET в файле .env");
+    throw new Error(`Не заданы ключи приложения ${who}: ${prefix}_CLIENT_ID и ${prefix}_CLIENT_SECRET в файле .env`);
   }
   return { id, secret };
 }
@@ -41,6 +54,7 @@ export const DEFAULT_SETTINGS = {
   autoLevel: true,          // подстраивать громкость перевода под громкость оригинала
   fastAudio: false,         // быстрый режим AAC-кодировщика: вдвое быстрее, качество чуть ниже
   deletePermanently: false, // удалять копию с Диска мимо Корзины
+  storage: "yandex",        // куда загружать облегчённую копию для переводчика: yandex — Яндекс Диск, google — Google Диск
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");

@@ -28,6 +28,7 @@ const PART_CONTENT = 5;
 const TIMEOUT = 60 * 60_000; // самое долгое ожидание в журналах пользователя — 21 мин (27-мин видео)
 const POLL = 30_000; // как в vot-cli; remainingTime у Яндекса приблизительный
 const POLL_MIN = 5_000;
+const SUBS_RETRY = [0, 5_000, 10_000, 15_000]; // паузы перед запросами субтитров (см. ниже)
 
 /**
  * Когда спросить Яндекс снова: раз в 30 с, но если он сам говорит, что осталось меньше, — к этому сроку
@@ -77,6 +78,9 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
   const client = new VOTClient({ requestLang: lang, responseLang: "ru", apiToken: lively ? token : undefined });
   const extraOpts = { useLivelyVoice: Boolean(lively && token) };
   const videoData = { ...(await getVideoData(url)), duration };
+  // vot.js сводит ссылку Google Диска к drive.google.com/file/d/<id> — а у каждого перевода своя ссылка
+  // (gdrive.publish): по одинаковой Яндекс отдал бы прежний перевод из своего кэша
+  if (videoData.host === "googledrive") videoData.url = url;
 
   let res;
   let errors = 0;
@@ -128,10 +132,18 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
 
   // Субтитры: Яндекс отдаёт оригинальные и переведённые (json, таймкоды в мс). Берём только русские:
   // раньше без русских брались первые попавшиеся — в видео ложились английские с подписью «Русские»
+  // Субтитры у Яндекса бывают готовы на секунды позже звука: сразу после перевода список иногда пуст, а чуть
+  // позже — полный (проверено 18.10 на трёх ссылках одного видео: пустой выпадал то на одной, то на другой)
   try {
-    const subs = await client.getSubtitles({ videoData, requestLang: lang === "auto" ? (detectedLang ?? "en") : lang });
-    const pick = subs.subtitles.find((s) => s.translatedLanguage === "ru" && s.translatedUrl);
-    const url = pick?.translatedUrl ?? subs.subtitles.find((s) => s.language === "ru")?.url;
+    let url = null;
+    for (const pause of SUBS_RETRY) {
+      if (pause) await sleep(pause, signal);
+      const subs = await client.getSubtitles({ videoData, requestLang: lang === "auto" ? (detectedLang ?? "en") : lang })
+        .catch(() => ({ subtitles: [] })); // сбой запроса — как «ещё не готовы»
+      const pick = subs.subtitles.find((s) => s.translatedLanguage === "ru" && s.translatedUrl);
+      url = pick?.translatedUrl ?? subs.subtitles.find((s) => s.language === "ru")?.url;
+      if (url) break;
+    }
     if (url) {
       const raw = await (await fetch(url, { signal })).json();
       const lines = raw.subtitles ?? [];

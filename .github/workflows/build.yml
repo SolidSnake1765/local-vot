@@ -3,8 +3,9 @@
 #   Галочка «Создать выпуск» выключена — пробная сборка: файлы на странице запуска (хранятся 7 дней).
 #   Включена — черновик выпуска v<версия из package.json> в Releases с установщиком и портативной версией
 #   (публикует его автор вручную кнопкой Publish).
-# Ключи приложения Яндекса берутся из секретов репозитория YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET
-# (Settings → Secrets and variables → Actions) и вшиваются в программу при сборке.
+# Ключи приложений Яндекса и Google берутся из секретов репозитория YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET,
+# GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET (Settings → Secrets and variables → Actions) и вшиваются в программу
+# при сборке; без любого из них сборка останавливается.
 name: Сборка
 
 on:
@@ -47,6 +48,8 @@ jobs:
         env:
           YANDEX_CLIENT_ID: ${{ secrets.YANDEX_CLIENT_ID }}
           YANDEX_CLIENT_SECRET: ${{ secrets.YANDEX_CLIENT_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false" # подписи нет — не искать сертификат
 
       - name: Файлы сборки (на странице запуска, 7 дней)
