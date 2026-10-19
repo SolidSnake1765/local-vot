@@ -25,6 +25,13 @@ YandexVOTProtobuf.decodeTranslationResponse = (buf) => {
 // status: 1 — готово, 2/3 — ждём, 5 — готова только часть (~10 мин), ждём полный перевод, 0 — отказ
 const FINISHED = 1;
 const PART_CONTENT = 5;
+// «Слишком много запросов. Попробуйте снова через 5 минут» (status 8). По журналу пользователя (19.10, 80 переводов,
+// 8 сразу, живые голоса): так Яндекс отвечает только на запуск НОВОГО перевода, когда за последние ~5 минут их
+// начато около 20, — идущие переводы не трогает, и пускает, как только старый запуск выпадает из окна: через
+// 20–80 с, а не через 5 минут. Поэтому повторяем через 20 с, как при сбое, но в счёт ошибок это не идёт
+// (раньше 6 отказов подряд роняли видео «переводчик не отвечает»; в журнале было до 4) — ждём до TIMEOUT.
+const TOO_MANY = 8;
+const BUSY_RETRY = 20_000;
 const TIMEOUT = 60 * 60_000; // самое долгое ожидание в журналах пользователя — 21 мин (27-мин видео)
 const POLL = 30_000; // как в vot-cli; remainingTime у Яндекса приблизительный
 const POLL_MIN = 5_000;
@@ -97,6 +104,12 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
     } catch (e) {
       if (e.data?.status === 0 || /couldn't translate/i.test(e.message)) {
         throw new Error(`Яндекс не смог перевести видео: ${e.data?.message ?? e.message}`);
+      }
+      if (e.data?.status === TOO_MANY || /слишком много запросов/i.test(e.data?.message ?? "")) {
+        if (Date.now() - started > TIMEOUT) throw new Error("Яндекс больше часа не принимает перевод: «слишком много запросов» — попробуйте позже");
+        onStatus("Очередь у Яндекса: сейчас много новых переводов сразу, повтор через 20 с");
+        await sleep(BUSY_RETRY, signal);
+        continue;
       }
       // сервер иногда отвечает «error_id ... see logs» — повторяем, а не падаем
       if (++errors > 5) throw new Error(`Переводчик Яндекса не отвечает: ${e.message}`);
