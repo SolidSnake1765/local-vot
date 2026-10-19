@@ -118,6 +118,11 @@ Settings, the Yandex sign-in and the log are kept when updating.
    Google Drive. Press **«Войти через Яндекс»** (Sign in with Yandex — open the Yandex page, enter the code from the
    app and allow access) or **«Войти через Google»** (Sign in with Google — the Google page opens in your browser).
    With Google Drive, also sign in to Yandex there for lively voices.
+
+   <p align="center">
+     <img src="docs/screenshot-cloud.png" alt="The Cloud window: Yandex Disk or Google Drive, sign in and out">
+   </p>
+
 2. Drag videos (or a whole folder) into the app window.
 3. In the video card, check the **original language** (the language spoken in the video), the voices and what
    to save, reorder the queue and press **«Запустить все»** (Start all). Defaults live in the right-hand

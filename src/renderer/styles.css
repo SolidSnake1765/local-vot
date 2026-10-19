@@ -96,7 +96,7 @@ h2 {
 .cloud-btn {
   display: flex; align-items: center; gap: 10px; padding: 7px 14px 7px 11px; border-radius: 12px; cursor: pointer;
   border: 1px solid var(--border); background: rgba(255, 255, 255, .02); color: var(--text); font: inherit; text-align: left;
-  min-width: 0; max-width: 380px;
+  min-width: 0; max-width: 480px;
 }
 .cloud-btn:hover { background: var(--surface-2); border-color: #3a4470; }
 .cloud-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -132,7 +132,8 @@ h2 {
 .cloud-opt ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; display: grid; gap: 5px; }
 .cloud-acc { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border-soft); display: flex; align-items: center;
   justify-content: space-between; gap: 10px; }
-.cloud-acc-text { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.cloud-acc-text { font-size: 12.5px; color: var(--muted); min-width: 0; line-height: 1.6; } /* строкой: длинная почта переносится по словам, а не блоками */
+.cloud-acc-text .disk-meter { vertical-align: middle; }
 .cloud-acc-text b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 .cloud-acc .btn { white-space: nowrap; flex: none; }
 .cloud-card .check { margin-top: 14px; }
