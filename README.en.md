@@ -196,3 +196,16 @@ If you fork this project or use its code and ideas, please link back to this rep
 
 > All rights to the original software belong to their respective owners. The app is not affiliated with the
 > original rights holders.
+
+---
+
+## My other projects
+
+- **[Nilesoft Shell Preset](https://github.com/SolidSnake1765/nilesoft-shell-preset)**: FFmpeg in the Windows right-click
+  menu: convert, compress, trim video, audio and images (GPU: NVIDIA, AMD, Intel). A Nilesoft Shell preset, English + Russian.
+- **Snake VPN**: my personal VPN service for users in Russia:
+  - [Telegram bot](https://t.me/SnakeVPNServiceBot).
+  - [snakeservice.tech](https://snakeservice.tech): the service website. Use it instead of the bot or together with it:
+    subscription, devices, payment, support. You can sign up with Google or Discord, Telegram is not required.
+  - [free.snakeservice.tech](https://free.snakeservice.tech): free proxies for Telegram. No subscription needed, so save
+    the link and share it with friends: it helps when Telegram does not open.
