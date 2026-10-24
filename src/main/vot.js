@@ -32,6 +32,8 @@ const PART_CONTENT = 5;
 // (раньше 6 отказов подряд роняли видео «переводчик не отвечает»; в журнале было до 4) — ждём до TIMEOUT.
 const TOO_MANY = 8;
 const BUSY_RETRY = 20_000;
+const LATE_AFTER = 3 * 60_000; // прикидка Яндекса просрочена на столько — показываем, сколько уже ждём
+const NO_ESTIMATE_LATE = 10 * 60_000; // то же, если Яндекс времени не назвал
 const TIMEOUT = 60 * 60_000; // самое долгое ожидание в журналах пользователя — 21 мин (27-мин видео)
 const POLL = 30_000; // как в vot-cli; remainingTime у Яндекса приблизительный
 const POLL_MIN = 5_000;
@@ -92,6 +94,7 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
   let res;
   let errors = 0;
   const started = Date.now();
+  let promisedBy = null; // к какому времени Яндекс обещал закончить (по первой прикидке)
   for (;;) {
     signal?.throwIfAborted();
     try {
@@ -127,7 +130,14 @@ export async function translate(url, duration, base, onStatus, signal, { lively 
       throw Object.assign(new Error(`Яндекс нашёл в видео другой язык: ${early}`), { code: "LANG_MISMATCH", detectedLang: early });
     }
     const left = res.remainingTime > 0 ? `, осталось ~${Math.ceil(res.remainingTime / 60)} мин` : "";
-    onStatus(res.status === PART_CONTENT ? `Готова часть перевода, ждём остальное${left}` : `Яндекс переводит${left}`);
+    // Прикидка Яндекса на некоторых видео застывает: «осталось ~1 мин» держится 20 минут (журнал пользователя, 24.10) —
+    // человек отменял и запускал заново, а Яндекс с новой ссылкой начинает с нуля. Обещание просрочено — говорим,
+    // сколько уже ждём, и что отменять не надо
+    if (promisedBy === null && res.remainingTime > 0) promisedBy = Date.now() + res.remainingTime * 1000;
+    const overdue = promisedBy !== null ? Date.now() - promisedBy > LATE_AFTER : Date.now() - started > NO_ESTIMATE_LATE;
+    const waited = overdue
+      ? ` · ждём уже ${Math.floor((Date.now() - started) / 60_000)} мин — у Яндекса бывает дольше обещанного, не отменяйте` : "";
+    onStatus((res.status === PART_CONTENT ? `Готова часть перевода, ждём остальное${left}` : `Яндекс переводит${left}`) + waited);
     if (Date.now() - started > TIMEOUT) throw new Error("Перевод не готов за час — попробуйте позже");
     await sleep(nextPoll(res.remainingTime), signal);
   }

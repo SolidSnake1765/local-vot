@@ -23,7 +23,7 @@ after(() => {
   globalThis.fetch = realFetch;
 });
 
-let answers = []; // ответы translateVideo по порядку: { busy } — status 8, иначе — готово
+let answers = []; // ответы translateVideo по порядку: { busy } — status 8, { wait: с } — «переводит, осталось …», иначе — готово
 let requests = 0;
 class FakeClient {
   async translateVideo() {
@@ -33,6 +33,7 @@ class FakeClient {
       throw Object.assign(new Error("Unknown response from Yandex"),
         { data: { status: 8, message: "Слишком много запросов.\nПопробуйте снова через 5 минут", isLivelyVoice: true } });
     }
+    if (next.wait) return { translated: false, status: 2, remainingTime: next.wait, translationId: `t${requests}` };
     return { translated: true, status: 1, url: "https://example.invalid/voice.mp3", translationId: `t${requests}` };
   }
   async getSubtitles() { return { subtitles: [] }; }
@@ -62,4 +63,13 @@ test("«слишком много запросов» больше часа — �
   await assert.rejects(translate("https://example.invalid/b.mp4", 60, path.join(dir, "b"), () => {}, undefined, { lang: "en" }),
     /больше часа не принимает перевод/);
   answers = [];
+});
+
+test("прикидка Яндекса застыла («осталось ~1 мин» 15 минут) — пишем, сколько уже ждём, и что отменять не надо", async () => {
+  answers = Array(30).fill({ wait: 60 }); // опрос раз в 30 с: 15 минут «осталось ~1 мин»
+  const status = [];
+  await translate("https://example.invalid/c.mp4", 60, path.join(dir, "c"), (st) => status.push(st), undefined, { lang: "en" });
+  const waiting = status.filter((st) => st.startsWith("Яндекс переводит"));
+  assert.ok(!waiting.slice(0, 7).some((st) => /ждём уже/.test(st)), "пока обещание не просрочено на 3 мин — без подписи");
+  assert.match(waiting.at(-1), /^Яндекс переводит, осталось ~1 мин · ждём уже 1[45] мин — у Яндекса бывает дольше обещанного, не отменяйте$/);
 });
