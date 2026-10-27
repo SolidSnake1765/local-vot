@@ -203,6 +203,9 @@ If you fork this project or use its code and ideas, please link back to this rep
 
 - **[Nilesoft Shell Preset](https://github.com/SolidSnake1765/nilesoft-shell-preset)**: FFmpeg in the Windows right-click
   menu: convert, compress, trim video, audio and images (GPU: NVIDIA, AMD, Intel). A Nilesoft Shell preset, English + Russian.
+- **[RTSS Overlay Preset](https://github.com/SolidSnake1765/rtss-overlay-preset)**: an i2HARD-style monitoring overlay for
+  RivaTuner Statistics Server: CPU, memory with live timings, GPU, FPS and frametime. No HWiNFO needed; installs with one
+  file and adapts to your hardware.
 - **Snake VPN**: my personal VPN service for users in Russia:
   - [Telegram bot](https://t.me/SnakeVPNServiceBot).
   - [snakeservice.tech](https://snakeservice.tech): the service website. Use it instead of the bot or together with it:

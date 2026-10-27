@@ -204,6 +204,9 @@ npm run dist                # установщик и портативная в�
 - **[Nilesoft Shell Preset](https://github.com/SolidSnake1765/nilesoft-shell-preset)** — FFmpeg в контекстном меню Windows:
   конвертировать, сжать, обрезать видео, звук и картинки (с ускорением на видеокартах NVIDIA, AMD, Intel).
   Пресет для Nilesoft Shell, русский и английский.
+- **[RTSS Overlay Preset](https://github.com/SolidSnake1765/rtss-overlay-preset)** — оверлей мониторинга для RivaTuner
+  Statistics Server в стиле i2HARD: процессор, память с живыми таймингами, видеокарта, FPS и frametime. Без HWiNFO,
+  ставится одним файлом и сам подстраивается под железо.
 - **Snake VPN** — мой личный VPN-сервис для россиян:
   - [Бот в Telegram](https://t.me/SnakeVPNServiceBot).
   - [snakeservice.tech](https://snakeservice.tech) — сайт сервиса. Можно пользоваться вместо бота, а можно вместе с ним:
