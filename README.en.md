@@ -7,7 +7,6 @@
 <p align="center">
   <a href="README.en.md"><img src="docs/badge-en.svg" alt="lang: English"></a>
   <a href="README.md"><img src="docs/badge-ru.svg" alt="язык: Русский"></a>
-  <img src="https://img.shields.io/badge/vibe--coded-100%25%20Claude-D97757" alt="100% vibe-coded with Claude">
 </p>
 
 <p align="center">
